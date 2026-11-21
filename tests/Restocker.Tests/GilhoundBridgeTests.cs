@@ -1,4 +1,6 @@
+using System.Collections.Generic;
 using System.IO;
+using System.Threading.Tasks;
 using System.Text.Json;
 using Restocker.Bridge;
 
@@ -187,6 +189,89 @@ public sealed class GilhoundBridgeTests
         Assert.Equal(new uint[] { 42 }, warnings);
     }
 
+    [Fact]
+    public async Task TickOnlyConsumesCompletedWorkAndThrottlesBothWorkers()
+    {
+        // A blocking result accessor would stall the tick while this scheduler withholds completion.
+        await Task.Run(() =>
+        {
+            var queue = new Queue<Action>();
+            Task Schedule(Action work)
+            {
+                var done = new TaskCompletionSource();
+                queue.Enqueue(() => { work(); done.SetResult(); });
+                return done.Task;
+            }
+
+            int reads = 0, handles = 0, writes = 0, beats = 0, errors = 0;
+            var pump = new BridgePump(clock, Schedule,
+                () => { reads++; return new InboxEntry(Id, null); },
+                entry => { handles++; return new(1, entry.Id, "ok", "", 100); },
+                reply => { if (++writes == 1) throw new IOException(); },
+                () => () => beats++, _ => errors++);
+
+            void Tick() { pump.TickHeartbeat(); pump.TickMailbox(); }
+
+            Tick();
+            var beat = queue.Dequeue();
+            var read = queue.Dequeue();
+            clock.Milliseconds += 5000;
+            Tick();
+            Assert.Empty(queue);
+            Assert.Equal((0, 0, 0), (reads, handles, beats));
+
+            read();
+            Assert.Equal(0, handles);
+            Tick();
+            Assert.Equal(1, handles);
+            var write = queue.Dequeue();
+            clock.Milliseconds += 250;
+            Tick();
+            Assert.Empty(queue);
+            write();
+            Tick();
+            queue.Dequeue()(); // Retry a failed publication without another dispatch.
+            Assert.Equal((1, 2, 1), (handles, writes, errors));
+
+            clock.Milliseconds += 249;
+            Tick();
+            Assert.Empty(queue);
+            clock.Milliseconds++;
+            Tick();
+            Assert.Single(queue);
+            beat();
+            Tick();
+            Assert.Equal(2, queue.Count);
+            queue.Dequeue()();
+            queue.Dequeue()();
+            Assert.Equal(2, beats);
+
+            clock.Milliseconds += 4999;
+            pump.TickHeartbeat();
+            Assert.Empty(queue);
+            clock.Milliseconds++;
+            pump.TickHeartbeat();
+            Assert.Single(queue);
+        }).WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public void IdleFramesAllocateNothing()
+    {
+        var pump = new BridgePump(clock, work => { work(); return Task.CompletedTask; },
+            () => null, _ => throw new Exception(), _ => throw new Exception(),
+            () => () => { }, _ => throw new Exception());
+        pump.TickMailbox();
+        pump.TickHeartbeat();
+        var allocated = GC.GetAllocatedBytesForCurrentThread();
+        for (var i = 0; i < 200; i++)
+        {
+            clock.Milliseconds++;
+            pump.TickMailbox();
+            pump.TickHeartbeat();
+        }
+        Assert.Equal(allocated, GC.GetAllocatedBytesForCurrentThread());
+    }
     private sealed class Mailbox : IDisposable
     {
         public readonly string Root = Directory.CreateTempSubdirectory().FullName;

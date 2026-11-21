@@ -1,12 +1,16 @@
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using Dalamud.Game.Addon.Lifecycle;
 using Dalamud.Game.Addon.Lifecycle.AddonArgTypes;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.UI;
-using Lumina.Excel.Sheets;
+using Item = Lumina.Excel.Sheets.Item;
+using World = Lumina.Excel.Sheets.World;
 using Restocker.Common;
 
 namespace Restocker.Bridge;
@@ -16,24 +20,24 @@ internal sealed class GilhoundBridge : IDisposable
     private readonly TravelCommands commands = new(TimeProvider.System);
     private readonly BridgeFiles files;
     private static readonly string Version = typeof(Plugin).Assembly.GetName().Version!.ToString();
-    private Task<InboxEntry?>? read;
-    private Task? write;
-    private TravelReply? pending;
-    private Task? heartbeat;
+    private readonly BridgePump pump;
     private nint openedBoard;
-    private long nextPoll;
-    private long nextHeartbeat;
+    // Built by the inbox worker before handing off the first item request.
+    private Dictionary<uint, string>? worldNames;
+    private string? searchName;
 
     internal GilhoundBridge(string configDirectory)
     {
         files = new(Path.Combine(configDirectory, "bridge"));
+        pump = new(TimeProvider.System, Task.Run, ReadEntry, Handle, files.Finish, CaptureHeartbeat, ReportError);
         Plugin.AddonLifecycle.RegisterListener(AddonEvent.PostSetup, "ItemSearch", OnBoardOpened);
         Plugin.AddonLifecycle.RegisterListener(AddonEvent.PostRefresh, "ItemSearch", OnBoardOpened);
         Plugin.AddonLifecycle.RegisterListener(AddonEvent.PreFinalize, "ItemSearch", OnBoardClosed);
         Plugin.Framework.Update += OnUpdate;
     }
 
-    private static string? CurrentWorld => Plugin.ObjectTable.LocalPlayer?.CurrentWorld.ValueNullable?.Name.ExtractText();
+    private static uint CurrentWorldId => Plugin.ObjectTable.LocalPlayer?.CurrentWorld.RowId ?? 0;
+    private string? CurrentWorld => worldNames?.GetValueOrDefault(CurrentWorldId);
 
     private void OnBoardOpened(AddonEvent type, AddonArgs args)
     {
@@ -65,7 +69,7 @@ internal sealed class GilhoundBridge : IDisposable
         }
 
         var name = commands.TakeSearchName(CurrentWorld,
-            id => Plugin.DataManager.GetExcelSheet<Item>().TryGetRow(id, out var row) ? row.Name.ExtractText() : null,
+            _ => searchName,
             id => Plugin.Log.Warning($"Gilhound: no localized Item name for id {id}"));
         if (name == null) return;
 
@@ -80,6 +84,7 @@ internal sealed class GilhoundBridge : IDisposable
 
     private void OnUpdate(IFramework framework)
     {
+        var start = Stopwatch.GetTimestamp();
         if (commands.HasSearch && (!Plugin.Configuration.SearchGilhoundItem || !Plugin.Configuration.AllowGilhoundTravelCommands))
         {
             commands.ClearSearch();
@@ -87,48 +92,79 @@ internal sealed class GilhoundBridge : IDisposable
         }
         if (openedBoard != 0) SearchOpenedBoard();
 
-        var tick = Environment.TickCount64;
-        if (tick < nextPoll) return;
-        nextPoll = tick + 250;
-
-        if (tick >= nextHeartbeat && heartbeat is not { IsCompleted: false })
+        var afterSearch = Stopwatch.GetTimestamp();
+        pump.TickHeartbeat();
+        var afterHeartbeat = Stopwatch.GetTimestamp();
+        pump.TickMailbox();
+        var end = Stopwatch.GetTimestamp();
+        var elapsed = Stopwatch.GetElapsedTime(start, end);
+        if (elapsed.TotalMilliseconds > 5)
         {
-            Observe(heartbeat);
-            nextHeartbeat = tick + 5000;
-            var now = DateTimeOffset.UtcNow;
-            var loggedIn = Plugin.ClientState.IsLoggedIn;
-            var world = loggedIn ? CurrentWorld : null;
-            var state = new Heartbeat(1, Version, now.ToUnixTimeSeconds(), loggedIn, world ?? "", Plugin.Configuration.AllowGilhoundTravelCommands);
-            heartbeat = Task.Run(() => files.UpdateHeartbeat(state, now));
+            var search = afterSearch - start;
+            var beat = afterHeartbeat - afterSearch;
+            var inbox = end - afterHeartbeat;
+            var phase = inbox >= Math.Max(search, beat) ? "inbox/dispatch" : beat >= search ? "heartbeat" : "board search";
+            Plugin.Log.Debug($"Gilhound OnUpdate took {elapsed.TotalMilliseconds:F2} ms (longest phase: {phase})");
         }
-
-        if (write is { IsCompleted: false } || read is { IsCompleted: false }) return;
-        if (write != null)
-        {
-            if (Observe(write)) pending = null;
-            write = null;
-        }
-        if (read != null)
-        {
-            var entry = Observe(read) ? read.Result : null;
-            read = null;
-            if (entry != null)
-            {
-                try
-                {
-                    pending = commands.Handle(entry, BlockedReason(), Dispatch, Plugin.Configuration.SearchGilhoundItem);
-                    if (pending.Status == "ok") openedBoard = 0;
-                }
-                catch (Exception ex)
-                {
-                    Plugin.Log.Warning(ex, "Gilhound command failed");
-                    pending = new(1, entry.Id, "error", "command failed", DateTimeOffset.UtcNow.ToUnixTimeSeconds());
-                }
-            }
-        }
-        if (pending is { } reply) write = Task.Run(() => files.Finish(reply));
-        else read = Task.Run(() => files.ReadOldest(DateTimeOffset.UtcNow));
     }
+
+    private InboxEntry? ReadEntry()
+    {
+        var entry = files.ReadOldest(DateTimeOffset.UtcNow);
+        if (entry is not { ValidEnvelope: true, Destination: not null, Request.Item: { Id: > 0 } item }) return entry;
+        try
+        {
+            worldNames ??= Plugin.DataManager.GetExcelSheet<World>()
+                .ToDictionary(world => world.RowId, world => world.Name.ExtractText());
+            var name = Plugin.DataManager.GetExcelSheet<Item>().TryGetRow(item.Id, out var row)
+                ? row.Name.ExtractText() : null;
+            return entry with { LocalizedName = name };
+        }
+        catch (Exception ex)
+        {
+            Plugin.Log.Warning(ex, "Gilhound item search data unavailable");
+            return entry;
+        }
+    }
+
+    private TravelReply Handle(InboxEntry entry)
+    {
+        try
+        {
+            var reply = commands.Handle(entry, BlockedReason(), Dispatch, Plugin.Configuration.SearchGilhoundItem);
+            if (reply.Status == "ok")
+            {
+                openedBoard = 0;
+                searchName = entry.LocalizedName;
+            }
+            return reply;
+        }
+        catch (Exception ex)
+        {
+            Plugin.Log.Warning(ex, "Gilhound command failed");
+            return new(1, entry.Id, "error", "command failed", DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        }
+    }
+
+    private Action CaptureHeartbeat()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var loggedIn = Plugin.ClientState.IsLoggedIn;
+        var worldId = loggedIn ? CurrentWorldId : 0;
+        var enabled = Plugin.Configuration.AllowGilhoundTravelCommands;
+        return () =>
+        {
+            try
+            {
+                var world = worldId != 0 && Plugin.DataManager.GetExcelSheet<World>().TryGetRow(worldId, out var row)
+                    ? row.Name.ExtractText() : "";
+                files.UpdateHeartbeat(new(1, Version, now.ToUnixTimeSeconds(), loggedIn, world, enabled), now);
+            }
+            catch (Exception ex) { ReportError(ex); }
+        };
+    }
+
+    private static void ReportError(Exception ex) => Plugin.Log.Warning(ex, "Gilhound bridge background operation failed");
 
     private static string? BlockedReason()
     {
@@ -149,20 +185,12 @@ internal sealed class GilhoundBridge : IDisposable
         return true;
     }
 
-    private static bool Observe(Task? task)
-    {
-        try { task?.GetAwaiter().GetResult(); return true; }
-        catch (Exception ex) { Plugin.Log.Warning(ex, "Gilhound bridge file operation failed"); return false; }
-    }
-
     public void Dispose()
     {
         Plugin.AddonLifecycle.UnregisterListener(AddonEvent.PostSetup, "ItemSearch", OnBoardOpened);
         Plugin.AddonLifecycle.UnregisterListener(AddonEvent.PostRefresh, "ItemSearch", OnBoardOpened);
         Plugin.AddonLifecycle.UnregisterListener(AddonEvent.PreFinalize, "ItemSearch", OnBoardClosed);
         Plugin.Framework.Update -= OnUpdate;
-        Observe(read);
-        Observe(write);
-        Observe(heartbeat);
+        pump.Drain();
     }
 }

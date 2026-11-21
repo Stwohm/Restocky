@@ -5,7 +5,18 @@ namespace Restocker.Bridge;
 
 internal sealed record TravelRequest(int Version, string? Id, string? Command, double? CreatedTs, SearchItem? Item = null);
 internal sealed record SearchItem(uint Id, bool Hq = false);
-internal sealed record InboxEntry(string Id, TravelRequest? Request);
+internal sealed record InboxEntry(string Id, TravelRequest? Request)
+{
+    private static readonly Regex Allowed = new(@"\A/li (?<world>[A-Za-z][A-Za-z' -]{1,30}) market\z", RegexOptions.CultureInvariant);
+
+    // The inbox reader parses and validates the wire data before the framework sees it.
+    internal bool ValidEnvelope { get; } = Request is { Version: 1, Command: not null, CreatedTs: double created }
+        && double.IsFinite(created) && Id.Length == 36 && Guid.TryParseExact(Id, "D", out _) && Id[14] == '4'
+        && "89abAB".Contains(Id[19]) && string.Equals(Request.Id, Id, StringComparison.OrdinalIgnoreCase);
+    internal string? Destination { get; } = Request?.Command is { } command && Allowed.Match(command) is { Success: true } match
+        ? match.Groups["world"].Value : null;
+    internal string? LocalizedName { get; init; }
+}
 internal sealed record TravelReply(int Version, string Id, string Status, string Reason, double Ts);
 internal sealed record Heartbeat(int Version, string PluginVersion, double Ts, bool LoggedIn, string World, bool Enabled)
 {
@@ -14,7 +25,6 @@ internal sealed record Heartbeat(int Version, string PluginVersion, double Ts, b
 
 internal sealed class TravelCommands(TimeProvider clock)
 {
-    private static readonly Regex Allowed = new(@"\A/li (?<world>[A-Za-z][A-Za-z' -]{1,30}) market\z", RegexOptions.CultureInvariant);
     private long? lastAttempt;
 
     private (SearchItem Item, string World, long Start)? search;
@@ -50,21 +60,19 @@ internal sealed class TravelCommands(TimeProvider clock)
         TravelReply Reply(string status, string reason) => new(1, entry.Id, status, reason, now);
         var r = entry.Request;
         if (blockedReason != null) return Reply("rejected", blockedReason);
-        if (r is not { Version: 1, Command: not null, CreatedTs: double created }
-            || !double.IsFinite(created) || entry.Id.Length != 36 || !Guid.TryParseExact(entry.Id, "D", out _) || entry.Id[14] != '4'
-            || !"89abAB".Contains(entry.Id[19]) || !string.Equals(r.Id, entry.Id, StringComparison.OrdinalIgnoreCase))
+        if (!entry.ValidEnvelope || r?.CreatedTs is not double created)
             return Reply("rejected", "invalid request");
         if (now - created > 30) return Reply("rejected", "expired");
         if (r.Item is { Id: 0 }) return Reply("rejected", "invalid item");
-        var match = Allowed.Match(r.Command);
-        if (!match.Success) return Reply("rejected", "invalid command");
+        var world = entry.Destination;
+        if (world == null) return Reply("rejected", "invalid command");
         var tick = clock.GetTimestamp();
         if (lastAttempt is long last && clock.GetElapsedTime(last, tick) < TimeSpan.FromSeconds(2))
             return Reply("rejected", "rate limited");
 
         lastAttempt = tick;
-        if (!dispatch(r.Command)) return Reply("error", "Lifestream not installed");
-        search = searchEnabled && r.Item is { } item ? (item, match.Groups["world"].Value, tick) : null;
+        if (!dispatch(r.Command!)) return Reply("error", "Lifestream not installed");
+        search = searchEnabled && r.Item is { } item ? (item, world, tick) : null;
         return Reply("ok", "");
     }
 }
