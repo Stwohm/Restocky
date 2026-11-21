@@ -102,6 +102,91 @@ public sealed class GilhoundBridgeTests
             Assert.Equal("rejected", commands.Handle(new(Id, request), null, _ => throw new Exception()).Status);
     }
 
+    private TravelReply Go(SearchItem? item, bool enabled = true, bool dispatched = true)
+    {
+        var created = clock.GetUtcNow().ToUnixTimeSeconds();
+        return commands.Handle(new(Id, new(1, Id, Command, created, item)), null, _ => dispatched, enabled);
+    }
+
+    [Fact]
+    public void ParsesItemAndUsesSheetNameOnceOnTargetWorld()
+    {
+        using var m = new Mailbox();
+        File.WriteAllText(m.Inbox(Id), JsonSerializer.Serialize(new
+        {
+            version = 1, id = Id, command = Command, created_ts = 100,
+            item = new { id = 50971, hq = true, name = "Sender's name" }
+        }));
+        var entry = Assert.IsType<InboxEntry>(m.Files.ReadOldest(m.Now));
+        Assert.Equal(new SearchItem(50971, true), entry.Request!.Item);
+        Assert.Equal("ok", commands.Handle(entry, null, _ => true).Status);
+        Assert.Null(commands.TakeSearchName("Cerberus", _ => throw new Exception(), _ => throw new Exception()));
+        Assert.Equal("Localized name", commands.TakeSearchName("raiden",
+            id => id == 50971 ? "Localized name" : null, _ => throw new Exception()));
+        Assert.False(commands.AwaitingBoard("Raiden"));
+    }
+
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("{\"id\":0}")]
+    [InlineData("{\"id\":-1}")]
+    [InlineData("{\"id\":1.5}")]
+    [InlineData("{\"id\":42,\"hq\":1}")]
+    public void InvalidItemRejectedBeforeDispatch(string json)
+    {
+        using var m = new Mailbox();
+        var item = JsonDocument.Parse(json);
+        using (item)
+            File.WriteAllText(m.Inbox(Id), JsonSerializer.Serialize(new
+                { version = 1, id = Id, command = Command, created_ts = 100, item = item.RootElement }));
+        var entry = Assert.IsType<InboxEntry>(m.Files.ReadOldest(m.Now));
+        Assert.Equal("rejected", commands.Handle(entry, null, _ => throw new Exception()).Status);
+    }
+
+    [Fact]
+    public void SearchExpiresAtTenMinutes()
+    {
+        Go(new(42));
+        clock.Milliseconds += 599_999;
+        Assert.True(commands.AwaitingBoard("Raiden"));
+        clock.Milliseconds++;
+        Assert.False(commands.AwaitingBoard("Raiden"));
+        Assert.False(commands.HasSearch);
+    }
+
+    [Fact]
+    public void OnlySuccessfulGoReplacesSearch()
+    {
+        Go(new(1));
+        clock.Milliseconds += 2000;
+        Go(new(2));
+        clock.Milliseconds += 2000;
+        Go(new(3), dispatched: false);
+        Assert.Equal("2", commands.TakeSearchName("Raiden", id => id.ToString(), _ => throw new Exception()));
+    }
+
+    [Fact]
+    public void TravelOnlyOrDisabledSearchClearsPendingItem()
+    {
+        Go(new(1));
+        clock.Milliseconds += 2000;
+        Assert.Equal("ok", Go(null).Status);
+        Assert.False(commands.HasSearch);
+        clock.Milliseconds += 2000;
+        Assert.Equal("ok", Go(new(2), enabled: false).Status);
+        Assert.False(commands.HasSearch);
+    }
+
+    [Fact]
+    public void UnknownItemIsConsumedWithOneWarning()
+    {
+        Go(new(42));
+        var warnings = new System.Collections.Generic.List<uint>();
+        Assert.Null(commands.TakeSearchName("Raiden", _ => null, warnings.Add));
+        Assert.Null(commands.TakeSearchName("Raiden", _ => throw new Exception(), warnings.Add));
+        Assert.Equal(new uint[] { 42 }, warnings);
+    }
+
     private sealed class Mailbox : IDisposable
     {
         public readonly string Root = Directory.CreateTempSubdirectory().FullName;
@@ -116,7 +201,7 @@ public sealed class GilhoundBridgeTests
         public string Outbox(string id) => Path.Combine(Root, "outbox", id + ".json");
         public void Put(string id) => File.WriteAllText(Inbox(id),
             JsonSerializer.Serialize(new { version = 1, id, command = Command, created_ts = 100.25 }));
-        public void Beat() => Files.UpdateHeartbeat(new(1, "0.3.9.0", Now.ToUnixTimeSeconds(), true, "Raiden", false), Now);
+        public void Beat() => Files.UpdateHeartbeat(new(1, "0.3.10.0", Now.ToUnixTimeSeconds(), true, "Raiden", false), Now);
         public void Dispose() => Directory.Delete(Root, true);
     }
 
@@ -206,10 +291,12 @@ public sealed class GilhoundBridgeTests
         using var heartbeat = JsonDocument.Parse(File.ReadAllText(Path.Combine(m.Root, "heartbeat.json")));
         var state = heartbeat.RootElement;
         Assert.Equal(1, state.GetProperty("version").GetInt32());
-        Assert.Equal("0.3.9.0", state.GetProperty("plugin_version").GetString());
+        Assert.Equal("0.3.10.0", state.GetProperty("plugin_version").GetString());
         Assert.Equal(m.Now.ToUnixTimeSeconds(), state.GetProperty("ts").GetInt64());
         Assert.True(state.GetProperty("logged_in").GetBoolean());
         Assert.Equal("Raiden", state.GetProperty("world").GetString());
         Assert.False(state.GetProperty("enabled").GetBoolean());
+        var features = state.GetProperty("features");
+        Assert.Equal(new[] { "travel", "mb_search_name" }, features.Deserialize<string[]>());
     }
 }

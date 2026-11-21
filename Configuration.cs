@@ -39,6 +39,7 @@ public sealed class Configuration : IPluginConfiguration
 
     // ---------------- Fork (Restocky) ----------------
 
+    public bool SearchGilhoundItem { get; set; } = true;
     public bool AllowGilhoundTravelCommands { get; set; } = true;
 
     public RepriceSortColumn RepriceSortColumn { get; set; } = RepriceSortColumn.Item;

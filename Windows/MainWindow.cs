@@ -170,6 +170,13 @@ public sealed class MainWindow : Window, IDisposable
             configuration.Save();
         }
 
+        var searchItem = configuration.SearchGilhoundItem;
+        if (ImGui.Checkbox("Search Gilhound item when the market board opens", ref searchItem))
+        {
+            configuration.SearchGilhoundItem = searchItem;
+            configuration.Save();
+        }
+
         var autoOpen = configuration.AutoOpenOnBell;
         if (ImGui.Checkbox(Strings.SettingsAutoOpenOnBell, ref autoOpen))
         {
