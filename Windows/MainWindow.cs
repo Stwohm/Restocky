@@ -163,6 +163,13 @@ public sealed class MainWindow : Window, IDisposable
 
     private void DrawSettingsTab()
     {
+        var allowTravel = configuration.AllowGilhoundTravelCommands;
+        if (ImGui.Checkbox("Allow Gilhound travel commands", ref allowTravel))
+        {
+            configuration.AllowGilhoundTravelCommands = allowTravel;
+            configuration.Save();
+        }
+
         var autoOpen = configuration.AutoOpenOnBell;
         if (ImGui.Checkbox(Strings.SettingsAutoOpenOnBell, ref autoOpen))
         {

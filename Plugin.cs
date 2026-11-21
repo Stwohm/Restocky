@@ -34,6 +34,8 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IGameInteropProvider Interop { get; private set; } = null!;
     internal RetainerHistoryCapture SaleHistory { get; }
 
+    private readonly Bridge.GilhoundBridge gilhoundBridge;
+
     private const string CommandName = "/restocky";
 
     public static Configuration Configuration { get; private set; } = null!;
@@ -115,6 +117,7 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.OpenMainUi += ToggleMainUi;
         // 設定タブは MainWindow 内にあるので OpenConfigUi も同じウィンドウへ
         PluginInterface.UiBuilder.OpenConfigUi += ToggleMainUi;
+        gilhoundBridge = new(PluginInterface.GetPluginConfigDirectory());
     }
 
     private void MigrateCostFloorOverrides()
@@ -143,6 +146,7 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.OpenMainUi -= ToggleMainUi;
         PluginInterface.UiBuilder.OpenConfigUi -= ToggleMainUi;
 
+        gilhoundBridge.Dispose();
         WindowSystem.RemoveAllWindows();
         AutoCycle.Dispose();
         LowStock.Dispose();
