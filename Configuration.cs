@@ -52,6 +52,8 @@ public sealed class Configuration : IPluginConfiguration
     public double MaxDropPercent { get; set; } = 30;
     public double MaxRaisePercent { get; set; } = 30;
 
+    public MatchQualitySettings MatchQuality { get; set; } = new();
+
     public bool AutoCostFloor { get; set; } = true;
     public bool CostFloorOverrideMigrated { get; set; }
 

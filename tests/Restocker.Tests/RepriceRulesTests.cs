@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using Restocker.Data;
 using Restocker.Market;
 using Restocker.Plan;
@@ -338,14 +339,111 @@ public class RepriceRulesTests
         finally { File.Delete(path); }
     }
 
+    [Theory]
+    [InlineData(true, true, 999)]
+    [InlineData(true, false, 899)]
+    [InlineData(false, true, 999)]
+    [InlineData(false, false, 899)]
+    public void Cheaper_opposite_quality_offer_only_competes_when_matching_is_off(bool hq, bool match, long target)
+    {
+        MarketOffer[] same = [new(1000, "Same", 1)];
+        MarketOffer[] other = [new(900, "Other", 2)];
+        var scan = new MarketScan(hq ? other : same, hq ? same : other);
+        string? competitor = null;
+        var plan = AutoRepricePlanner.Plan("key", "Retainer", [new(0, 1, hq, 1, 1050)],
+            (_, quality) => scan.Competitors(quality, match), (_, _) => 0, Default, DateTime.UtcNow,
+            onDecision: (_, decision, offers) =>
+                competitor = MarketOfferFormat.RepriceCompetitor(offers, match, decision.LowestCompetitor));
+        var action = Assert.Single(plan.Actions);
+        Assert.Equal(target, action.UnitPrice);
+        Assert.Equal(match ? "Same 1x" : "Other 2x;Same 1x", action.Undercutters);
+        var chosenHq = (match ? hq : !hq) ? "true" : "false";
+        Assert.Equal($"quality_pool={(match ? "same" : "both")} lowest_hq={chosenHq} lowest={target + 1}", competitor);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Only_opposite_quality_keeps_current_price_even_with_floor(bool hq)
+    {
+        MarketOffer[] other = [new(900, "Other", 2)];
+        var scan = new MarketScan(hq ? other : [], hq ? [] : other);
+        var plan = AutoRepricePlanner.Plan("key", "Retainer", [new(0, 1, hq, 1, 1050)],
+            (_, quality) => scan.Competitors(quality, true), (_, _) => 2000, Default, DateTime.UtcNow);
+        Assert.Empty(plan.Actions);
+        var skipped = Assert.Single(plan.NotApplied);
+        Assert.Equal(RepriceReason.NoCompetitor, skipped.Reason);
+        Assert.Equal(1050, skipped.NewPrice);
+        Assert.Empty(skipped.Undercutters);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Bait_and_rival_counts_use_the_selected_pool(bool match)
+    {
+        var scan = new MarketScan([new(40, "NQ bait", 1)], [new(50, "HQ bait", 1), new(999, "HQ", 1)]);
+        var offers = scan.Competitors(true, match);
+        var plan = AutoRepricePlanner.Plan("key", "Retainer", [new(0, 1, true, 1, 1000)],
+            (_, _) => offers, (_, _) => 0, Default, DateTime.UtcNow);
+        var bait = Assert.Single(plan.Baits);
+        Assert.Equal(match ? new[] { "HQ bait" } : new[] { "NQ bait", "HQ bait" }, bait.Baits.Select(o => o.Seller));
+        var action = Assert.Single(plan.Actions);
+        Assert.Equal(998, action.UnitPrice);
+        Assert.Equal($"quality_pool={(match ? "same" : "both")} lowest_hq=true lowest=999",
+            MarketOfferFormat.RepriceCompetitor(offers, match, action.LowestCompetitor));
+        var history = new UndercutHistory();
+        var now = DateTime.UtcNow;
+        history.RecordScan(1, true, 1000, offers, now);
+        Assert.Equal(match ? 0 : 1, history.Counts(1, true, "NQ bait", now).Last24h);
+        Assert.Equal(1, history.Counts(1, true, "HQ bait", now).Last24h);
+    }
+
+    [Fact]
+    public void Market_suggestion_selects_quality_before_testing_the_bait_gap()
+    {
+        var cache = new MarketCache();
+        cache.Replace(1, new MarketScan([new(100, "NQ", 1)], [new(500, "HQ", 1)]));
+        Assert.Equal(500, cache.GetLowest(1, true, true, 110));
+        Assert.Equal(100, cache.GetLowest(1, true, false, 110));
+        Assert.Equal(500, cache.GetLowest(1, true, false, 510));
+        cache.Replace(1, new MarketScan([new(100, "NQ", 1)], []));
+        Assert.Equal(0, cache.GetLowest(1, true, true, 510));
+    }
+
+    [Fact]
+    public void Missing_quality_settings_default_on_when_upgrading()
+    {
+        Assert.True(new MatchQualitySettings().Default);
+        var settings = System.Text.Json.JsonSerializer.Deserialize<MatchQualitySettings>("{}")!;
+        Assert.True(settings.For(1, true));
+        Assert.True(settings.For(1, false));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Explicit_quality_default_and_per_quality_overrides_round_trip(bool matchByDefault)
+    {
+        var settings = new MatchQualitySettings { Default = matchByDefault };
+        settings.NQ[1] = !matchByDefault;
+        var json = System.Text.Json.JsonSerializer.Serialize(settings);
+        settings = System.Text.Json.JsonSerializer.Deserialize<MatchQualitySettings>(json)!;
+        Assert.Equal(matchByDefault, settings.For(1, true));
+        Assert.Equal(!matchByDefault, settings.For(1, false));
+        Assert.Equal(matchByDefault, settings.For(2, false));
+        settings.NQ.Remove(1);
+        Assert.Equal(matchByDefault, settings.For(1, false));
+    }
+
     [Fact]
     public void Cache_fresh_check_uses_update_time()
     {
         var now = new System.DateTime(2026, 11, 20, 12, 0, 0);
         var c = new MarketCache { Clock = () => now };
-        c.Replace(1, false, new long[] { 300, 100, 200 });
-        Assert.True(c.HasDataSince(1, false, now));
-        Assert.False(c.HasDataSince(1, false, now.AddSeconds(1)));
-        Assert.Equal(new long[] { 100, 200, 300 }, c.GetRaw(1, false));
+        c.Replace(1, new MarketScan([new(300, "A", 1), new(100, "B", 1), new(200, "C", 1)], []));
+        Assert.True(c.HasDataSince(1, now));
+        Assert.False(c.HasDataSince(1, now.AddSeconds(1)));
+        Assert.Equal(new long[] { 100, 200, 300 }, c.GetOffers(1, false, true).Select(o => o.Price));
     }
 }

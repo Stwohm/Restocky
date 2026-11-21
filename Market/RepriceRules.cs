@@ -61,7 +61,7 @@ public readonly record struct RepriceDecision(
 /// Pure price rule for the auto / full-cycle path:
 /// lowest competitor (outliers ignored) - undercut, clamped to the item floor,
 /// refused when the change exceeds the configured drop or raise limit.
-/// HQ and NQ are compared separately by the caller (it passes the matching list).
+/// The caller selects the competitor pool using the listing's Match quality setting.
 /// </summary>
 public static class RepriceRules
 {
@@ -81,7 +81,7 @@ public static class RepriceRules
     };
 
     /// <param name="currentPrice">Our current asking price for this listing.</param>
-    /// <param name="competitorPricesAscending">Other sellers' unit prices, same HQ flag, ascending. Own retainers excluded.</param>
+    /// <param name="competitorPricesAscending">Other sellers' unit prices, selected quality pool, ascending. Own retainers excluded.</param>
     /// <param name="floor">Per-item minimum price. 0 = none.</param>
     public static RepriceDecision Decide(
         long currentPrice,

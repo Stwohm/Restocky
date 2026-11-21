@@ -71,8 +71,12 @@ public sealed class Plugin : IDalamudPlugin
         Tracker = new TrackerHost(Framework, ChatGui, DataManager, Log, PluginInterface.GetPluginConfigDirectory(),
             Configuration, Costs.Ledger.Consume);
         SaleHistory = new RetainerHistoryCapture(Tracker.Tracker);
-        MarketWatcher.CompetitorsObserved += (item, hq, offers) =>
-            Tracker.Tracker.ObserveCompetitors(item, hq, offers, DateTime.UtcNow);
+        MarketWatcher.CompetitorsObserved += (item, scan) =>
+        {
+            var now = DateTime.UtcNow;
+            Tracker.Tracker.ObserveCompetitors(item, false, scan.Competitors(false, Configuration.MatchQuality.For(item, false)), now);
+            Tracker.Tracker.ObserveCompetitors(item, true, scan.Competitors(true, Configuration.MatchQuality.For(item, true)), now);
+        };
         Executor = new Executor(Framework, Log, Configuration, Costs.Ledger, MarketWatcher.Cache);
         Executor.History = new PriceHistoryLog(
             System.IO.Path.Combine(PluginInterface.GetPluginConfigDirectory(), "price-history.csv"));

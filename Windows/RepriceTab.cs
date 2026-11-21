@@ -354,7 +354,7 @@ public sealed class RepriceTab
                 Plugin.Log.Information($"  slot={listing.ListingIndex} item={listing.ItemId} hq={listing.IsHQ} name='{name}' HELD (left at {listing.UnitPrice:N0})");
                 continue;
             }
-            if (!marketCache.HasDataSince(listing.ItemId, listing.IsHQ, since))
+            if (!marketCache.HasDataSince(listing.ItemId, since))
             {
                 // Fork: a new full-cycle prefill must not leave a stale proposal available to Add all.
                 if (respectHold) editedPrice.Remove(EditKey(snap.Key, listing));
@@ -364,9 +364,12 @@ public sealed class RepriceTab
             }
             var current = listing.UnitPrice;
             var floor = configuration.EffectiveFloorFor(listing.ItemId, listing.IsHQ, costLedger);
-            var decision = RepriceRules.Decide(current, marketCache.GetRaw(listing.ItemId, listing.IsHQ), floor.Price, settings);
+            var matchQuality = configuration.MatchQuality.For(listing.ItemId, listing.IsHQ);
+            var offers = marketCache.GetOffers(listing.ItemId, listing.IsHQ, matchQuality);
+            var decision = RepriceRules.Decide(current, offers.Select(o => o.Price).ToArray(), floor.Price, settings);
             var lowest = decision.LowestCompetitor;
-            var dropped = BaitFinder.Dropped(marketCache.GetOffers(listing.ItemId, listing.IsHQ), lowest);
+            var competitor = MarketOfferFormat.RepriceCompetitor(offers, matchQuality, lowest);
+            var dropped = BaitFinder.Dropped(offers, lowest);
             if (dropped.Count > 0)
             {
                 var notice = new BaitNotice(listing.ItemId, listing.IsHQ, snap.RetainerName, dropped, lowest);
@@ -375,8 +378,10 @@ public sealed class RepriceTab
             }
             if (lowest <= 0)
             {
-                if (respectHold) editedPrice[EditKey(snap.Key, listing)] = (decision.NewPrice, false);
-                Plugin.Log.Information($"  slot={listing.ListingIndex} item={listing.ItemId} hq={listing.IsHQ} name='{name}' lowest={lowest} (skipped, no data)");
+                if (matchQuality)
+                    Plugin.ChatPrint($"{name} [{snap.RetainerName} #{listing.ListingIndex}] kept {current:N0}, {Strings.NoCompetitor(listing.IsHQ)}");
+                if (respectHold || matchQuality) editedPrice[EditKey(snap.Key, listing)] = (decision.NewPrice, false);
+                Plugin.Log.Information($"  slot={listing.ListingIndex} item={listing.ItemId} hq={listing.IsHQ} name='{name}' {competitor} (skipped, no data)");
                 continue;
             }
             var newPrice = decision.NewPrice;
@@ -384,7 +389,7 @@ public sealed class RepriceTab
             if (decision.MarkForReview)
                 Plugin.ChatPrint($"{name} [{snap.RetainerName} #{listing.ListingIndex}] {Strings.PriceWarning(decision.Reason, current, newPrice)}");
             applied++;
-            Plugin.Log.Information($"  slot={listing.ListingIndex} item={listing.ItemId} hq={listing.IsHQ} name='{name}' current={current:N0} lowest={lowest:N0} -> new={newPrice:N0}");
+            Plugin.Log.Information($"  slot={listing.ListingIndex} item={listing.ItemId} hq={listing.IsHQ} name='{name}' current={current:N0} {competitor} -> new={newPrice:N0}");
         }
 
         if (missing.Count == 0)
@@ -560,7 +565,7 @@ public sealed class RepriceTab
         ImGui.BeginTooltip();
         if (stuck && record != null)
         {
-            var offers = marketCache.GetOffers(listing.ItemId, listing.IsHQ);
+            var offers = marketCache.GetOffers(listing.ItemId, listing.IsHQ, configuration.MatchQuality.For(listing.ItemId, listing.IsHQ));
             var lowest = offers.Count > 0 ? offers[0].Price.ToString("N0") : "—";
             ImGui.TextUnformatted(string.Format(Strings.StuckTooltip, age, record.RepriceCount, lowest));
             ImGui.Separator();
@@ -607,8 +612,8 @@ public sealed class RepriceTab
     // Fork: display competitors from the last scan and the past week's most active rivals.
     private void DrawUndercutters(ListingEntry listing)
     {
-        var updated = marketCache.UpdatedUtc(listing.ItemId, listing.IsHQ);
-        var offers = updated == null ? System.Array.Empty<MarketOffer>() : marketCache.GetOffers(listing.ItemId, listing.IsHQ);
+        var updated = marketCache.UpdatedUtc(listing.ItemId);
+        var offers = updated == null ? System.Array.Empty<MarketOffer>() : marketCache.GetOffers(listing.ItemId, listing.IsHQ, configuration.MatchQuality.For(listing.ItemId, listing.IsHQ));
         var price = listing.UnitPrice;
         // The cache sorts by unit price, so the first offer is enough to color the icon.
         if (offers.Count > 0 && offers[0].Price < price)

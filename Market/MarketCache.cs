@@ -5,10 +5,21 @@ using System.Linq;
 namespace Restocker.Market;
 
 /// <summary>One competitor listing from a market board answer.</summary>
-public readonly record struct MarketOffer(long Price, string Seller, int Quantity);
+public readonly record struct MarketOffer(long Price, string Seller, int Quantity)
+{
+    public bool IsHQ { get; init; }
+}
 
 public static class MarketOfferFormat
 {
+    internal static string RepriceCompetitor(IReadOnlyList<MarketOffer> offers, bool matchQuality, long lowest)
+    {
+        // The first offer at the selected price is the winner when prices tie.
+        var chosen = offers.FirstOrDefault(o => o.Price == lowest);
+        var hq = chosen.Price <= 0 ? "none" : chosen.IsHQ ? "true" : "false";
+        return $"quality_pool={(matchQuality ? "same" : "both")} lowest_hq={hq} lowest={lowest}";
+    }
+
     /// <summary>
     /// Sellers priced below <paramref name="ourPrice"/> with the quantity they have up,
     /// e.g. "Rival 4x;Bob 1x" (several listings of one seller are summed), cheapest first.
@@ -27,55 +38,43 @@ public static class MarketOfferFormat
     }
 }
 
-/// <summary>
-/// 「最安値 -1 ギル」のための短命なマーケット価格キャッシュ。
-/// ItemSearchResult addon が更新されるたびに <see cref="MarketWatcher"/> が
-/// 該当アイテム種ぶんの listings 価格を上書き保存する。
-///
-/// インスタンスは Plugin 寿命と同じ。プロセス終了で消える（永続化しない）。
-///
-/// Fork: stores every competitor offer (price + retainer name), not only the first, so the
-/// outlier filter has something to work with and the history knows who is competing; plus
-/// the time of the last update so a fetch can tell fresh data from a previous cycle's leftovers.
-/// </summary>
+/// <summary>One home-world response. Every pricing view uses offers from the same scan.</summary>
+public sealed class MarketScan
+{
+    private readonly MarketOffer[] nq;
+    private readonly MarketOffer[] hq;
+    private readonly MarketOffer[] all;
+
+    public MarketScan(IEnumerable<MarketOffer> nqOffers, IEnumerable<MarketOffer> hqOffers)
+    {
+        nq = Sorted(nqOffers.Select(o => o with { IsHQ = false }));
+        hq = Sorted(hqOffers.Select(o => o with { IsHQ = true }));
+        all = nq.Length == 0 ? hq : hq.Length == 0 ? nq : Sorted(nq.Concat(hq));
+    }
+
+    private static MarketOffer[] Sorted(IEnumerable<MarketOffer> offers)
+        => offers.Where(o => o.Price > 0).OrderBy(o => o.Price).ToArray();
+
+    public IReadOnlyList<MarketOffer> Competitors(bool isHQ, bool matchQuality)
+        => matchQuality ? (isHQ ? hq : nq) : all;
+}
+
 public sealed class MarketCache
 {
-    private readonly Dictionary<(uint ItemId, bool IsHQ), (List<MarketOffer> Offers, DateTime UpdatedUtc)> store = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<uint, (MarketScan Scan, DateTime UpdatedUtc)> store = new();
 
-    /// <summary>Injectable clock for tests.</summary>
     public Func<DateTime> Clock { get; set; } = () => DateTime.UtcNow;
 
-    /// <summary>1 検索ぶんの listings をまるごと差し替える。空リストは「競合なし」を意味する。</summary>
-    public void Replace(uint itemId, bool isHQ, IEnumerable<MarketOffer> offers)
-    {
-        store[(itemId, isHQ)] = (offers.Where(o => o.Price > 0).OrderBy(o => o.Price).ToList(), Clock());
-    }
+    public void Replace(uint itemId, MarketScan scan) => store[itemId] = (scan, Clock());
 
-    public void Replace(uint itemId, bool isHQ, IEnumerable<long> prices)
-        => Replace(itemId, isHQ, prices.Select(p => new MarketOffer(p, string.Empty, 0)));
+    public DateTime? UpdatedUtc(uint itemId)
+        => store.TryGetValue(itemId, out var entry) ? entry.UpdatedUtc : null;
 
-    /// <summary>外れ値除外つきの最安値。データ無し / 競合なしなら 0。</summary>
-    public long GetLowest(uint itemId, bool isHQ)
-    {
-        var raw = GetRaw(itemId, isHQ);
-        return raw.Count == 0 ? 0 : LowestPriceResolver.Pick(raw);
-    }
+    public bool HasDataSince(uint itemId, DateTime sinceUtc) => UpdatedUtc(itemId) >= sinceUtc;
 
-    public bool HasData(uint itemId, bool isHQ) => store.ContainsKey((itemId, isHQ));
+    public IReadOnlyList<MarketOffer> GetOffers(uint itemId, bool isHQ, bool matchQuality)
+        => store.TryGetValue(itemId, out var entry) ? entry.Scan.Competitors(isHQ, matchQuality) : Array.Empty<MarketOffer>();
 
-    /// <summary>When the entry was last written, or null when never fetched.</summary>
-    public DateTime? UpdatedUtc(uint itemId, bool isHQ)
-        => store.TryGetValue((itemId, isHQ), out var e) ? e.UpdatedUtc : null;
-
-    /// <summary>True when the entry was written at or after <paramref name="sinceUtc"/>.</summary>
-    public bool HasDataSince(uint itemId, bool isHQ, DateTime sinceUtc)
-        => store.TryGetValue((itemId, isHQ), out var e) && e.UpdatedUtc >= sinceUtc;
-
-    /// <summary>Prices ascending.</summary>
-    public IReadOnlyList<long> GetRaw(uint itemId, bool isHQ)
-        => store.TryGetValue((itemId, isHQ), out var e) ? e.Offers.Select(o => o.Price).ToList() : new List<long>();
-
-    /// <summary>Offers ascending by price.</summary>
-    public IReadOnlyList<MarketOffer> GetOffers(uint itemId, bool isHQ)
-        => store.TryGetValue((itemId, isHQ), out var e) ? e.Offers : new List<MarketOffer>();
+    public long GetLowest(uint itemId, bool isHQ, bool matchQuality, long ourPrice = 0)
+        => LowestPriceResolver.Pick(GetOffers(itemId, isHQ, matchQuality).Select(o => o.Price).ToArray(), ourPrice: ourPrice);
 }

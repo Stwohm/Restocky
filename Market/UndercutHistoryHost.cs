@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
 using Dalamud.Plugin.Services;
 
@@ -35,7 +34,7 @@ internal sealed class UndercutHistoryHost : IDisposable
         framework.Update += OnUpdate;
     }
 
-    private void OnOffersUpdated(uint itemId, IReadOnlyList<MarketOffer> nqOffers, IReadOnlyList<MarketOffer> hqOffers)
+    private void OnOffersUpdated(uint itemId, MarketScan scan)
     {
         var observedUtc = DateTime.UtcNow;
         _ = framework.RunOnFrameworkThread(() =>
@@ -43,7 +42,7 @@ internal sealed class UndercutHistoryHost : IDisposable
             if (disposed) return;
             try
             {
-                RecordScan(itemId, nqOffers, hqOffers, observedUtc);
+                RecordScan(itemId, scan, observedUtc);
             }
             catch (Exception ex)
             {
@@ -52,7 +51,7 @@ internal sealed class UndercutHistoryHost : IDisposable
         });
     }
 
-    private void RecordScan(uint itemId, IReadOnlyList<MarketOffer> nqOffers, IReadOnlyList<MarketOffer> hqOffers,
+    private void RecordScan(uint itemId, MarketScan scan,
         DateTime observedUtc)
     {
         var player = objectTable.LocalPlayer;
@@ -73,8 +72,8 @@ internal sealed class UndercutHistoryHost : IDisposable
             }
         }
 
-        if (lowestNq > 0 && nqOffers.Count > 0) History.RecordScan(itemId, false, lowestNq, nqOffers, observedUtc);
-        if (lowestHq > 0 && hqOffers.Count > 0) History.RecordScan(itemId, true, lowestHq, hqOffers, observedUtc);
+        if (lowestNq > 0) History.RecordScan(itemId, false, lowestNq, scan.Competitors(false, configuration.MatchQuality.For(itemId, false)), observedUtc);
+        if (lowestHq > 0) History.RecordScan(itemId, true, lowestHq, scan.Competitors(true, configuration.MatchQuality.For(itemId, true)), observedUtc);
     }
 
     private void OnUpdate(IFramework _)

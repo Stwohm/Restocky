@@ -220,6 +220,14 @@ public sealed class MainWindow : Window, IDisposable
         ImGui.Separator();
         ImGui.TextUnformatted("Full / auto cycle");
 
+        var matchDefault = configuration.MatchQuality.Default;
+        if (ImGui.Checkbox(Strings.MatchQualityDefault, ref matchDefault))
+        {
+            configuration.MatchQuality.Default = matchDefault;
+            configuration.Save();
+        }
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.MatchQualityHint);
+
         var undercut = configuration.UndercutGil;
         ImGui.SetNextItemWidth(120);
         if (ImGui.InputInt("Undercut (gil below lowest competitor)", ref undercut))
@@ -338,7 +346,8 @@ public sealed class MainWindow : Window, IDisposable
         // Items currently listed on any retainer (from snapshots) plus any item that already has a floor.
         var sheet = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Item>();
         var ids = configuration.Snapshots.Values.SelectMany(s => s.Listings).Select(l => l.ItemId)
-            .Concat(configuration.PriceFloors.Keys).Distinct()
+            .Concat(configuration.PriceFloors.Keys).Concat(configuration.LowStock.Select(e => e.ItemId))
+            .Concat(configuration.MatchQuality.NQ.Keys).Concat(configuration.MatchQuality.HQ.Keys).Distinct()
             .Select(id => (Id: id, Name: sheet.TryGetRow(id, out var row) ? row.Name.ExtractText() : $"#{id}"))
             .Where(x => floorFilter.Length == 0 || x.Name.Contains(floorFilter, StringComparison.OrdinalIgnoreCase))
             .OrderBy(x => x.Name)
@@ -355,7 +364,7 @@ public sealed class MainWindow : Window, IDisposable
             .GroupBy(l => l.ItemId)
             .ToDictionary(g => g.Key, g => (Min: g.Min(l => l.UnitPrice), Max: g.Max(l => l.UnitPrice)));
 
-        if (!ImGui.BeginTable("##floors", 4, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY,
+        if (!ImGui.BeginTable("##floors", 5, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY,
                 new Vector2(0, System.Math.Max(160f, ImGui.GetContentRegionAvail().Y)))) return;
         ImGui.TableSetupScrollFreeze(0, 1);
         ImGui.TableSetupColumn(Strings.ColItem, ImGuiTableColumnFlags.WidthStretch);
@@ -365,6 +374,7 @@ public sealed class MainWindow : Window, IDisposable
         var autoButtonSpace = ImGui.CalcTextSize(autoLabel).X + 2 * ImGui.GetStyle().FramePadding.X
             + ImGui.GetStyle().ItemSpacing.X;
         ImGui.TableSetupColumn("Floor", ImGuiTableColumnFlags.WidthFixed, 120 + autoButtonSpace);
+        ImGui.TableSetupColumn(Strings.MatchQuality, ImGuiTableColumnFlags.WidthFixed, 130);
         ImGui.TableHeadersRow();
         var frame = ImGui.GetFrameCount();
         foreach (var (id, name) in ids)
@@ -378,8 +388,8 @@ public sealed class MainWindow : Window, IDisposable
             else
                 ImGui.TextDisabled("—");
             ImGui.TableNextColumn();
-            var nq = marketCache.GetLowest(id, false);
-            var hq = marketCache.GetLowest(id, true);
+            var nq = marketCache.GetLowest(id, false, true);
+            var hq = marketCache.GetLowest(id, true, true);
             var marketText = (nq > 0 ? nq.ToString("N0") : "") + (hq > 0 ? (nq > 0 ? " / " : "") + hq.ToString("N0") + " HQ" : "");
             if (marketText.Length == 0) ImGui.TextDisabled("not fetched");
             else ImGui.TextUnformatted(marketText);
@@ -426,7 +436,32 @@ public sealed class MainWindow : Window, IDisposable
             {
                 configuration.Save();
             }
+            ImGui.TableNextColumn();
+            DrawMatchQuality(id, false);
+            DrawMatchQuality(id, true);
         }
         ImGui.EndTable();
+    }
+
+    private void DrawMatchQuality(uint itemId, bool hq)
+    {
+        var settings = configuration.MatchQuality;
+        var overrides = settings.Overrides(hq);
+        var value = settings.For(itemId, hq);
+        var quality = hq ? "HQ" : "NQ";
+        if (ImGui.Checkbox($"{quality}##match-{itemId}", ref value))
+        {
+            overrides[itemId] = value;
+            configuration.Save();
+        }
+        if (overrides.ContainsKey(itemId))
+        {
+            ImGui.SameLine();
+            if (ImGui.SmallButton($"{Strings.UseDefault}##match-{itemId}-{quality}"))
+            {
+                overrides.Remove(itemId);
+                configuration.Save();
+            }
+        }
     }
 }

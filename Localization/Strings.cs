@@ -42,6 +42,11 @@ public static class Strings
     // Fork: manual prefill and Apply show the same warning for the proposed change.
     public static string MaxRaiseSetting => T("Max raise % per change (0 = off)", "1回の値上げ上限 %（0で無効）", "Max. Erhöhung pro Änderung in % (0 = aus)", "Hausse maximale par changement en % (0 = désactivé)", "每次涨价上限 %（0 = 关闭）", "1회 가격 인상 한도 % (0 = 끄기)");
     public static string AutoCostFloorSetting => T("Automatic floor from purchase cost", "購入原価から最低価格を自動設定", "Automatischer Mindestpreis aus Einkaufskosten", "Prix plancher automatique selon le coût d’achat", "按购入成本自动设置底价", "구매 원가 기준 자동 최저가");
+    public static string MatchQuality => T("Match quality", "同じ品質で比較", "Qualität abgleichen", "Même qualité", "匹配品质", "동일 품질 비교");
+    public static string MatchQualityDefault => T("Match quality by default", "既定で同じ品質のみ比較", "Standardmäßig gleiche Qualität vergleichen", "Comparer la même qualité par défaut", "默认只比较相同品质", "기본적으로 동일 품질만 비교");
+    public static string MatchQualityHint => T("Compare HQ with HQ and NQ with NQ. Override each quality beside the item's floor.", "HQ は HQ、NQ は NQ と比較します。アイテムの最低価格の横で品質別に変更できます。", "HQ mit HQ und NQ mit NQ vergleichen. Neben dem Mindestpreis lässt sich jede Qualität einzeln einstellen.", "Compare les offres HQ entre elles et les offres NQ entre elles. Chaque qualité se règle à côté du prix plancher.", "HQ 只与 HQ 比较，NQ 只与 NQ 比较。可在物品底价旁分别设置。", "HQ는 HQ와, NQ는 NQ와 비교합니다. 아이템 최저가 옆에서 품질별로 변경할 수 있습니다.");
+    public static string UseDefault => T("Default", "既定", "Standard", "Par défaut", "默认", "기본값");
+    public static string NoCompetitor(bool hq) => string.Format(T("no {0} competitor", "{0} の競合なし", "kein {0}-Konkurrenzangebot", "aucune offre concurrente {0}", "没有 {0} 竞争报价", "{0} 경쟁 매물 없음"), hq ? "HQ" : "NQ");
     public static string PriceFloorSettings => T("Price floors (manual applies to HQ and NQ, 0 = auto)", "最低価格（手動はHQ・NQ共通、0 = 自動）", "Mindestpreise (manuell für HQ und NQ, 0 = automatisch)", "Prix planchers (manuel pour HQ et NQ, 0 = auto)", "底价（手动值适用于 HQ 和 NQ，0 = 自动）", "최저가 (수동 값은 HQ와 NQ 공통, 0 = 자동)");
     public static string ResetFloorToAuto => T("Auto", "自動", "Auto", "Auto", "自动", "자동");
     public static string SaleTaxSetting => T("Sales tax %", "販売税率 %", "Verkaufssteuer %", "Taxe sur la vente %", "销售税率 %", "판매세 %");

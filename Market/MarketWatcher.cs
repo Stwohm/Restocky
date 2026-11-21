@@ -7,13 +7,8 @@ using FFXIVClientStructs.FFXIV.Client.Game;
 namespace Restocker.Market;
 
 /// <summary>
-/// Dalamud の <see cref="IMarketBoard.OfferingsReceived"/> イベントで
-/// マーケットボード検索結果を受信して <see cref="MarketCache"/> を更新する。
-/// PennyPincher と同じ流儀で、
-///   - 自リテイナー listing はスキップ（自分で自分を undercut しない）
-///   - HQ / NQ それぞれで「サーバが返した順序の先頭にある有効 listing」を採用
-///     (server returns listings sorted by price ascending)
-/// その採用 price を 1 件だけ <see cref="MarketCache"/> に入れる。
+/// Captures home-world competitor offers by quality from <see cref="IMarketBoard.OfferingsReceived"/>.
+/// Own retainers are excluded before publishing the scan.
 /// </summary>
 public sealed unsafe class MarketWatcher : IDisposable
 {
@@ -25,12 +20,12 @@ public sealed unsafe class MarketWatcher : IDisposable
     /// <summary>
     /// Fork: fired for answers that belong to our own fetch (expected item set), i.e. the home
     /// world board seen from our retainer. Browsing another world's board never fires it.
-    /// Args: itemId, isHq, competitor offers ascending.
+    /// Args: itemId and the complete market scan.
     /// </summary>
-    public event Action<uint, bool, System.Collections.Generic.IReadOnlyList<MarketOffer>>? CompetitorsObserved;
+    public event Action<uint, MarketScan>? CompetitorsObserved;
 
     // Fork: fresh competitor offers from manual and automated searches, grouped by quality.
-    internal event Action<uint, IReadOnlyList<MarketOffer>, IReadOnlyList<MarketOffer>>? OffersUpdated;
+    internal event Action<uint, MarketScan>? OffersUpdated;
 
     /// <summary>同じ検索結果が複数回飛んでくる server エラー時の保護。</summary>
     private int lastRequestId = -1;
@@ -87,8 +82,7 @@ public sealed unsafe class MarketWatcher : IDisposable
             {
                 if (itemId != 0)
                 {
-                    Cache.Replace(itemId, false, Array.Empty<MarketOffer>());
-                    Cache.Replace(itemId, true, Array.Empty<MarketOffer>());
+                    Cache.Replace(itemId, new MarketScan([], []));
                     log.Information($"[Restocker] OfferingsReceived item={itemId} empty board -> no competitor");
                 }
                 return;
@@ -133,21 +127,20 @@ public sealed unsafe class MarketWatcher : IDisposable
 
             // Both flags are always written (possibly empty) so "no HQ competitor" is a known
             // answer, not a timeout.
-            Cache.Replace(itemId, false, nqPrices);
-            Cache.Replace(itemId, true, hqPrices);
+            var scan = new MarketScan(nqPrices, hqPrices);
+            Cache.Replace(itemId, scan);
             if (expectedItemId.HasValue)
             {
                 try
                 {
-                    CompetitorsObserved?.Invoke(itemId, false, Cache.GetOffers(itemId, false));
-                    CompetitorsObserved?.Invoke(itemId, true, Cache.GetOffers(itemId, true));
+                    CompetitorsObserved?.Invoke(itemId, scan);
                 }
                 catch (Exception ex) { log.Error(ex, "[Restocker] CompetitorsObserved handler threw"); }
             }
             if (nqPrices.Count != 0 || hqPrices.Count != 0)
-                OffersUpdated?.Invoke(itemId, nqPrices, hqPrices);
+                OffersUpdated?.Invoke(itemId, scan);
 
-            dump.Append($"\n  → nq={nqPrices.Count} (lowest {Cache.GetLowest(itemId, false):N0})  hq={hqPrices.Count} (lowest {Cache.GetLowest(itemId, true):N0})");
+            dump.Append($"\n  → nq={nqPrices.Count} (lowest {Cache.GetLowest(itemId, false, true):N0})  hq={hqPrices.Count} (lowest {Cache.GetLowest(itemId, true, true):N0})");
             log.Information(dump.ToString());
         }
         catch (Exception ex)

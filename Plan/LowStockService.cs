@@ -106,8 +106,8 @@ public sealed class LowStockService : IDisposable
     public long Price(LowStockEntry e)
     {
         if (e.Price > 0) return e.Price;
-        var ours = tracker.ActiveFor(e.ItemId, e.IsHq).Select(r => r.LastPrice).Where(p => p > 0).DefaultIfEmpty(0).Min();
-        return ours > 0 ? ApplyFloor(e, ours) : MarketSuggestion(e);
+        var ours = CurrentPrice(e);
+        return ours > 0 ? ApplyFloor(e, ours) : MarketSuggestion(e, ours);
     }
 
     public List<PlannedAction> PlanRestock(LowStockEntry e, int targetUnits, long unitPrice)
@@ -139,15 +139,18 @@ public sealed class LowStockService : IDisposable
     /// </summary>
     public (long Price, DateTime FetchedUtc)? Suggestion(LowStockEntry e)
     {
-        var at = marketCache.UpdatedUtc(e.ItemId, e.IsHq);
+        var at = marketCache.UpdatedUtc(e.ItemId);
         if (at == null) return null;
-        var price = MarketSuggestion(e);
-        return price > 0 ? (price, at.Value) : null;
+        var price = MarketSuggestion(e, CurrentPrice(e));
+        return (price, at.Value);
     }
 
-    private long MarketSuggestion(LowStockEntry e)
+    private long CurrentPrice(LowStockEntry e) =>
+        tracker.ActiveFor(e.ItemId, e.IsHq).Select(r => r.LastPrice).Where(p => p > 0).DefaultIfEmpty(0).Min();
+
+    private long MarketSuggestion(LowStockEntry e, long currentPrice)
     {
-        var lowest = marketCache.GetLowest(e.ItemId, e.IsHq);
+        var lowest = marketCache.GetLowest(e.ItemId, e.IsHq, configuration.MatchQuality.For(e.ItemId, e.IsHq), currentPrice);
         return lowest > 0 ? ApplyFloor(e, Math.Max(1, lowest - configuration.UndercutGil)) : 0;
     }
 

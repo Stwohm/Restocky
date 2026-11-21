@@ -16,7 +16,9 @@ Fork changes and where they live:
   item/HQ before `SetRetainerMarketPrice`; mismatch = skip + history row `error`. RepriceTab keys
   edited prices by slot+item+HQ and re-reads the snapshot after a fetch.
 - **Market data.** `MarketWatcher` keeps every competitor price (upstream kept only the first, so
-  the outlier filter never ran) and writes empty lists for "no competitor". `MarketCache` has
+  the outlier filter never ran) and records an empty scan for "no competitor". Each scan exposes sorted HQ, NQ and combined offers.
+  Match quality defaults on (same quality). Per-item HQ and NQ overrides apply before bait filtering,
+  manual prefill, Low stock market suggestions and new rival observations. `MarketCache` has
   update timestamps; a fetch only accepts data newer than its ComparePrices click.
 - **Rules** (`Market/RepriceRules.cs`, tested). Keep a low outlier group when our listing price is
   positive and at most the group's highest price times the gap ratio (default 1.5). Only dropped
@@ -95,7 +97,7 @@ Restocker/
 ├── Plan/
 │   └── Planner.cs                     # PlanNewListings / PlanFromInventoryList / Overflow (pure logic, tested)
 ├── Market/
-│   ├── MarketCache.cs                 # in-memory (itemId, isHq) → list<long> (single-entry, single retainer's view)
+│   ├── MarketCache.cs                 # latest timestamped home-world scan per item, with sorted HQ, NQ and combined offers
 │   ├── MarketWatcher.cs               # IMarketBoard.OfferingsReceived listener; PennyPincher logic + 'expectedItem' filter
 │   └── LowestPriceResolver.cs         # outlier-aware lowest picker (pure logic, tested)
 ├── Localization/

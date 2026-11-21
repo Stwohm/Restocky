@@ -37,7 +37,8 @@ public static class AutoRepricePlanner
         Func<uint, bool, long> floorFor,
         RepriceSettings settings,
         DateTime nowUtc,
-        Func<uint, bool, bool>? isHeld = null)
+        Func<uint, bool, bool>? isHeld = null,
+        Action<LiveListing, RepriceDecision, IReadOnlyList<MarketOffer>>? onDecision = null)
     {
         var result = new Result();
         foreach (var l in listings)
@@ -78,6 +79,8 @@ public static class AutoRepricePlanner
                 if (dropped.Count > 0 && !result.Baits.Exists(b => b.ItemId == l.ItemId && b.IsHq == l.IsHQ))
                     result.Baits.Add(new BaitNotice(l.ItemId, l.IsHQ, retainerName, dropped, d.LowestCompetitor));
             }
+
+            onDecision?.Invoke(l, d, offers ?? Array.Empty<MarketOffer>());
 
             if (d.Apply)
             {

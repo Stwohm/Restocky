@@ -104,7 +104,7 @@ public sealed unsafe class Executor : IDisposable
     public int RepricesSkipped { get; private set; }
     public int ListingsHeld { get; private set; }
     // Fork: retain guarded proposals until the end-of-cycle chat summary.
-    private readonly List<PriceHistoryRow> guardedReprices = new();
+    private readonly List<PriceHistoryRow> skippedSummaryRows = new();
 
     /// <summary>Fork: every price actually written in this run, for the chat summary.</summary>
     public List<(string Retainer, uint ItemId, bool IsHq, long OldPrice, long NewPrice)> AppliedReprices { get; } = new();
@@ -416,7 +416,7 @@ public sealed unsafe class Executor : IDisposable
         RepricesApplied = 0;
         AppliedReprices.Clear();
         RepricesSkipped = 0;
-        guardedReprices.Clear();
+        skippedSummaryRows.Clear();
         ListingsHeld = 0;
         if (jobs.Count == 0) { State = ExecutionState.Done; return; }
 
@@ -797,9 +797,14 @@ public sealed unsafe class Executor : IDisposable
             var arrow = r.NewPrice < r.OldPrice ? "↓" : "↑";
             Plugin.ChatPrint($"  {name}{(r.IsHq ? " (HQ)" : "")} [{r.Retainer}]: {r.OldPrice:N0} → {r.NewPrice:N0} {arrow}");
         }
-        foreach (var r in guardedReprices)
+        foreach (var r in skippedSummaryRows)
         {
             var name = sheet.TryGetRow(r.ItemId, out var row) ? row.Name.ExtractText() : $"#{r.ItemId}";
+            if (r.Reason == RepriceReason.NoCompetitor)
+            {
+                Plugin.ChatPrint($"{name} [{r.Retainer} #{r.Slot}] kept {r.OldPrice:N0}, {Localization.Strings.NoCompetitor(r.Hq)}");
+                continue;
+            }
             var skipped = string.Format(Localization.Strings.SkippedPrice, RepriceRules.ReasonCode(r.Reason));
             var percent = RepriceRules.ChangePercent(r.OldPrice, r.NewPrice);
             Plugin.ChatPrint($"  {name}{(r.Hq ? " (HQ)" : "")} [{r.Retainer} #{r.Slot}] {skipped}: {r.OldPrice:N0} → {r.NewPrice:N0} ({percent:+0.##;-0.##;0}%)");
@@ -889,13 +894,24 @@ public sealed unsafe class Executor : IDisposable
             key,
             job.RetainerName,
             live,
-            (item, hq) => marketCache != null && marketCache.HasDataSince(item, hq, since)
-                ? marketCache.GetOffers(item, hq)
+            (item, hq) => marketCache != null && marketCache.HasDataSince(item, since)
+                ? marketCache.GetOffers(item, hq, configuration.MatchQuality.For(item, hq))
                 : null,
             (itemId, hq) => configuration.EffectiveFloorFor(itemId, hq, costLedger).Price,
             configuration.ToRepriceSettings(),
             DateTime.UtcNow,
-            configuration.IsHeld);
+            configuration.IsHeld,
+            (listing, decision, offers) =>
+            {
+                var matchQuality = configuration.MatchQuality.For(listing.ItemId, listing.IsHQ);
+                var competitor = MarketOfferFormat.RepriceCompetitor(offers, matchQuality, decision.LowestCompetitor);
+                var reason = RepriceRules.ReasonCode(decision.Reason);
+                var details = $"{job.RetainerName} slot={listing.Slot} item={listing.ItemId} hq={listing.IsHQ} old={listing.UnitPrice:N0} {competitor} target={decision.NewPrice:N0}";
+                if (decision.Reason is RepriceReason.MaxDrop or RepriceReason.MaxRaise or RepriceReason.Error)
+                    log.Warning($"[Restocker] not applied ({reason}): {details}");
+                else
+                    log.Information($"[Restocker] reprice decision ({reason}): {details}");
+            });
 
         ListingsHeld += plan.HeldCount;
 
@@ -903,10 +919,9 @@ public sealed unsafe class Executor : IDisposable
         {
             RepricesSkipped++;
             History?.Append(row);
-            if (row.Reason is RepriceReason.MaxDrop or RepriceReason.MaxRaise)
-                guardedReprices.Add(row);
-            if (row.Reason is RepriceReason.MaxDrop or RepriceReason.MaxRaise or RepriceReason.Error)
-                log.Warning($"[Restocker] not applied ({RepriceRules.ReasonCode(row.Reason)}): {job.RetainerName} slot={row.Slot} item={row.ItemId} hq={row.Hq} old={row.OldPrice:N0} lowest={row.LowestCompetitor:N0} target={row.NewPrice:N0}");
+            if (row.Reason is RepriceReason.MaxDrop or RepriceReason.MaxRaise ||
+                (row.Reason == RepriceReason.NoCompetitor && configuration.MatchQuality.For(row.ItemId, row.Hq)))
+                skippedSummaryRows.Add(row);
         }
         foreach (var b in plan.Baits)
         {
@@ -1627,12 +1642,12 @@ public sealed unsafe class Executor : IDisposable
     {
         // Fork: only data written after this ComparePrices click counts. Upstream accepted any
         // cached entry, so a second fetch of the same item returned the previous result instantly.
-        var ready = marketCache != null && marketCache.HasDataSince(fetchItemId, fetchIsHq, fetchClickedAtUtc);
+        var ready = marketCache != null && marketCache.HasDataSince(fetchItemId, fetchClickedAtUtc);
         var timeout = waitingSince != null && DateTime.UtcNow - waitingSince.Value > TimeSpan.FromSeconds(6);
         if (!ready && !timeout) return;
 
         if (!ready) log.Warning($"[Restocker] market fetch timeout for item={fetchItemId} hq={fetchIsHq} (ItemSearchResult open={AddonHelper.IsOpen("ItemSearchResult")})");
-        else log.Information($"[Restocker] market data ready for item={fetchItemId} hq={fetchIsHq}, competitors={marketCache!.GetRaw(fetchItemId, fetchIsHq).Count}, lowest={marketCache.GetLowest(fetchItemId, fetchIsHq)}");
+        else log.Information($"[Restocker] market data ready for item={fetchItemId} hq={fetchIsHq}, competitors={marketCache!.GetOffers(fetchItemId, fetchIsHq, true).Count}, lowest={marketCache.GetLowest(fetchItemId, fetchIsHq, true)}");
 
         // 1 件分の fetch 完了。expected は 0 (= 全部無視) に戻して次の listing に進む。
         Plugin.Instance?.SetMarketWatcherExpected(0, false);

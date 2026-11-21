@@ -143,7 +143,7 @@ public sealed class LowStockTab
 
             ImGui.TableNextColumn();
             var sug = service.Suggestion(e);
-            if (sug is { } s)
+            if (sug is { Price: > 0 } s)
             {
                 var age = DateTime.UtcNow - s.FetchedUtc;
                 if (ImGui.SmallButton($"Use {s.Price:N0}##use-{id}")) restockPrice[key] = s.Price;
@@ -153,7 +153,8 @@ public sealed class LowStockTab
             }
             else
             {
-                ImGui.TextDisabled("not fetched");
+                ImGui.TextDisabled(sug == null ? "not fetched" : configuration.MatchQuality.For(e.ItemId, e.IsHq)
+                    ? Strings.NoCompetitor(e.IsHq) : "no competitor");
             }
             ImGui.SameLine();
             var compareFrom = service.RetainerToCompareFrom(e);
@@ -161,7 +162,12 @@ public sealed class LowStockTab
             if (!canCheck) ImGui.BeginDisabled();
             if (ImGui.SmallButton($"Check##chk-{id}") && compareFrom != null)
             {
-                executor.OnFetchMarketCompleted = null;
+                executor.OnFetchMarketCompleted = () =>
+                {
+                    if (configuration.MatchQuality.For(e.ItemId, e.IsHq) &&
+                        service.Suggestion(e) is { Price: 0 } empty && empty.FetchedUtc >= executor.JobFetchStartUtc)
+                        Plugin.ChatPrint($"{ItemName(e.ItemId)}: {Strings.NoCompetitor(e.IsHq)}");
+                };
                 executor.OnFetchJobCompleted = null;
                 executor.StartFetchMarketPricesForRetainer(compareFrom);
             }

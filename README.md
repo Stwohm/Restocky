@@ -43,7 +43,14 @@ retainer list appears. You get updates from `/xlplugins` like any other plugin.
 ### Price rules
 
 - New price = the lowest competitor price minus the undercut (default 1 gil). Your own retainers are
-  ignored. HQ and NQ are priced separately, and only home-world market data is used.
+  ignored. Restocky uses offers from your home world.
+- **Match quality** is on by default, including when upgrading. Turn it off per item to let HQ
+  compete with NQ prices. The HQ and NQ checkboxes beside each item's floor independently override
+  **Match quality by default** in Settings.
+  **Default** restores inheritance for that quality.
+- With matching enabled, Full cycle, Auto cycle and I set prices keep your asking price when no
+  same-quality competitor exists and report the reason in chat. Low stock offers no market suggestion
+  in that case. Bait checks and new rival observations use the same competitor pool.
 - Bait listings are skipped and reported in chat. A bait listing is one or two listings that are at
   least 1.5× cheaper than the next group.
 - **Floor:** a price never goes below the item's floor.

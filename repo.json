@@ -4,7 +4,7 @@
     "Name": "Restocky",
     "InternalName": "Restocky",
     "AssemblyVersion": "0.3.10.0",
-    "Changelog": "0.3.10.0 — Gilhound Go can search for the item by name when the market board opens on the destination world.",
+    "Changelog": "0.3.10.0 — Match quality is on by default, including when upgrading. Turn it off per item to let HQ compete with NQ prices. Set a global default in Settings or override HQ and NQ beside each item's floor. Gilhound Go can search for the item by name when the market board opens on the destination world.",
     "Punchline": "Restocker fork: bulk reprice with price guards, sales tracking and an optional bell auto-cycle.",
     "Description": "Personal fork of yagi2/Restocker. Reprice every retainer listing to the live market lowest -N gil with floor / max-drop guards, track each listing until it sells (reprices, competitors, days, gil), one-click full cycle and an optional timed auto-cycle at the summoning bell that waits for AutoRetainer. Timed automation is against the FFXIV ToS; use at your own risk.",
     "ApplicableVersion": "any",
