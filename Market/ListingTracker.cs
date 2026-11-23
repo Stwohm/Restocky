@@ -124,6 +124,14 @@ public sealed class ListingTracker(SaleCostConsumer? consumeCost = null)
     public IEnumerable<ListingRecord> ActiveFor(uint itemId, bool hq)
         => Records.Where(r => r.Outcome == Active && r.ItemId == itemId && r.IsHq == hq);
 
+    internal List<string> PreferredRetainers(uint itemId, bool hq, IReadOnlySet<string> keys)
+        => Records.Where(r => r.ItemId == itemId && r.IsHq == hq && keys.Contains(r.RetainerKey))
+            .OrderBy(r => r.Outcome == Active ? 0 : 1)
+            .ThenByDescending(r => r.EndedUtc ?? r.LastSeenUtc)
+            .Select(r => r.RetainerKey)
+            .Distinct()
+            .ToList();
+
     // Fork: stuck age follows the listing through reprices and slot moves.
     public static bool IsStuck(ListingRecord listing, DateTime nowUtc, int thresholdDays)
         => listing.Outcome == Active && listing.MissingSinceUtc == null

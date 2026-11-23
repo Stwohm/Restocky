@@ -96,11 +96,7 @@ public sealed class LowStockService : IDisposable
     }
 
     public int PerListing(LowStockEntry e)
-    {
-        if (e.PerListing > 0) return e.PerListing;
-        var qty = tracker.ActiveFor(e.ItemId, e.IsHq).GroupBy(r => r.Quantity).OrderByDescending(g => g.Count()).Select(g => g.Key).FirstOrDefault();
-        return qty > 0 ? qty : 1;
-    }
+        => RestockPlanner.PerListing(e, tracker.ActiveFor(e.ItemId, e.IsHq).Select(r => r.Quantity));
 
     /// <summary>Entry price, else a floored suggestion from our listing or the market, else 0.</summary>
     public long Price(LowStockEntry e)
@@ -122,16 +118,7 @@ public sealed class LowStockService : IDisposable
     /// Restock lists there first when they have a free slot.
     /// </summary>
     public List<string> PreferredRetainers(LowStockEntry e)
-    {
-        var keys = MyRetainers().Select(s => s.Key).ToHashSet();
-        return tracker.Records
-            .Where(r => r.ItemId == e.ItemId && r.IsHq == e.IsHq && keys.Contains(r.RetainerKey))
-            .OrderBy(r => r.Outcome == ListingTracker.Active ? 0 : 1)
-            .ThenByDescending(r => r.EndedUtc ?? r.LastSeenUtc)
-            .Select(r => r.RetainerKey)
-            .Distinct()
-            .ToList();
-    }
+        => tracker.PreferredRetainers(e.ItemId, e.IsHq, MyRetainers().Select(s => s.Key).ToHashSet());
 
     /// <summary>
     /// Market lowest (bait filtered) - undercut from the last fetch, with when it was fetched.

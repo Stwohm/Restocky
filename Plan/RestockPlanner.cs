@@ -9,7 +9,10 @@ namespace Restocker.Plan;
 /// <param name="SourceKey">Retainer snapshot key, or "char.{cid:X}.bag" / "char.{cid:X}.saddle".</param>
 /// <param name="FixedTargetKey">For a retainer's own inventory: that retainer (items cannot cross retainers). Null = any retainer.</param>
 /// <param name="Available">Units of the item in that source.</param>
-public sealed record RestockSource(string SourceKey, string? FixedTargetKey, int Available);
+public sealed record RestockSource(string SourceKey, string? FixedTargetKey, int Available)
+{
+    internal int MaxPerListing { get; init; } = int.MaxValue;
+}
 
 /// <summary>A low-stock watch entry (persisted in Configuration).</summary>
 [Serializable]
@@ -78,7 +81,7 @@ public static class RestockPlanner
                     ?? free.Where(p => p.Value > 0).OrderByDescending(p => p.Value).Select(p => p.Key).FirstOrDefault();
                 if (target == null || !free.TryGetValue(target, out var slots) || slots <= 0) break;
 
-                var qty = Math.Min(perListing, Math.Min(need, avail));
+                var qty = Math.Min(Math.Min(perListing, src.MaxPerListing), Math.Min(need, avail));
                 result.Add(new PlannedAction
                 {
                     Kind = PlannedActionKind.NewListing,
@@ -96,6 +99,30 @@ public static class RestockPlanner
             if (need <= 0) break;
         }
         return result;
+    }
+
+    internal static int PerListing(LowStockEntry entry, IEnumerable<int> listedQuantities)
+    {
+        if (entry.PerListing > 0) return entry.PerListing;
+        var qty = listedQuantities.GroupBy(q => q).OrderByDescending(g => g.Count()).Select(g => g.Key).FirstOrDefault();
+        return qty > 0 ? qty : 1;
+    }
+
+    internal static Dictionary<(uint ItemId, bool IsHq), int> SaddleStagingNeeds(
+        IEnumerable<PlannedAction> actions, IEnumerable<PlannedAction>? laterActions = null)
+    {
+        // When an item uses the saddlebag, reserve enough in the bag for both sources.
+        var needs = actions.Where(a => a.Kind == PlannedActionKind.NewListing && a.SourceKey.StartsWith("char."))
+            .GroupBy(a => (a.ItemId, a.IsHQ))
+            .Where(g => g.Any(a => a.SourceKey.EndsWith(".saddle")))
+            .ToDictionary(g => g.Key, g => g.Sum(a => a.Quantity));
+        if (laterActions != null)
+            foreach (var action in laterActions.Where(a => a.Kind == PlannedActionKind.NewListing && a.SourceKey.EndsWith(".bag")))
+            {
+                var key = (action.ItemId, action.IsHQ);
+                if (needs.TryGetValue(key, out var need)) needs[key] = need + action.Quantity;
+            }
+        return needs;
     }
 
     /// <summary>Transitions for the alert: true exactly once when listed units drop to/below the threshold.</summary>

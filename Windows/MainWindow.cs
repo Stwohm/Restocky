@@ -316,6 +316,21 @@ public sealed class MainWindow : Window, IDisposable
             configuration.Save();
         }
 
+        var autoRestock = configuration.AutoRestockDuringCycle;
+        if (ImGui.Checkbox(Strings.AutoRestockSetting, ref autoRestock))
+        {
+            configuration.AutoRestockDuringCycle = autoRestock;
+            configuration.Save();
+        }
+
+        var maxScanAge = configuration.AutoRestockMaxScanAgeHours;
+        ImGui.SetNextItemWidth(120);
+        if (ImGui.InputInt(Strings.AutoRestockScanAgeSetting, ref maxScanAge))
+        {
+            configuration.AutoRestockMaxScanAgeHours = Math.Max(0, maxScanAge);
+            configuration.Save();
+        }
+
         // Chat channel for Restocky messages (cycle summaries, bait notices, auto-cycle on/off).
         var channels = new[]
         {

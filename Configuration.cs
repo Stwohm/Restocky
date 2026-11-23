@@ -89,6 +89,9 @@ public sealed class Configuration : IPluginConfiguration
     /// <summary>Consecutive failed cycles before the auto cycle turns itself off.</summary>
     public int AutoCycleMaxFailures { get; set; } = 3;
 
+    public bool AutoRestockDuringCycle { get; set; }
+    public int AutoRestockMaxScanAgeHours { get; set; } = 6;
+
     /// <summary>Chat channel (XivChatType value) for Restocky messages. Default 71 = RetainerSale,
     /// so a Chat 2 "Market" tab that shows Retainer Sale Notifications picks them up.</summary>
     public int ChatChannel { get; set; } = (int)Dalamud.Game.Text.XivChatType.RetainerSale;

@@ -8,6 +8,7 @@ using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 using Restocker.Common;
 using Restocker.Data;
+using Restocker.Localization;
 using Restocker.Market;
 using Restocker.Plan;
 
@@ -60,6 +61,10 @@ public sealed unsafe class Executor : IDisposable
     private long historyReceipt;
     private DateTime historyDeadline;
     private readonly Queue<PlannedAction> currentJobActions = new();
+    private bool collectAutoRestock;
+    private bool autoRestockPass;
+    private readonly Dictionary<string, RetainerSnapshot> autoRestockSnapshots = new();
+    private readonly Dictionary<(uint ItemId, bool IsHq), (AutoRestockPriceKind Kind, long Price, int Quantity)> autoRestockResults = new();
     private readonly Queue<int> slotsToReadPrice = new();
     private string? readingSnapshotKey;
     private bool cancelRequested;
@@ -78,6 +83,8 @@ public sealed unsafe class Executor : IDisposable
     /// <summary>PreStagingSaddle 用: 最後の saddle slot 移動を発火した時刻。
     /// 最終 staging からの settle 時間を保証するため。</summary>
     private DateTime? lastStageAt;
+    private ((uint ItemId, bool IsHq) Item, int InBag)? pendingAutoStage;
+    private readonly HashSet<(uint ItemId, bool IsHq)> failedAutoStages = new();
 
     /// <summary>FetchAwaitingSellDialog で listing slot click を再送した記録。</summary>
     private bool fetchSlotClickRetried;
@@ -423,6 +430,10 @@ public sealed unsafe class Executor : IDisposable
     {
         Mode = mode;
         if (mode == ExecutionMode.FullCycle) baitMatches.BeginCycle();
+        collectAutoRestock = mode == ExecutionMode.FullCycle && configuration.AutoRestockDuringCycle && configuration.LowStock.Count > 0;
+        autoRestockPass = false;
+        autoRestockSnapshots.Clear();
+        autoRestockResults.Clear();
         historyRequested.Clear();
         jobCursor = 0;
         CompletedJobs = 0;
@@ -453,10 +464,19 @@ public sealed unsafe class Executor : IDisposable
         if (AddonHelper.IsOpen("RetainerSellList"))
         {
             var rm = RetainerManager.Instance();
-            var activeName = rm != null ? rm->GetActiveRetainer()->NameString : null;
+            var active = rm != null ? rm->GetActiveRetainer() : null;
+            var activeName = active != null ? active->NameString : null;
             var firstMatchIdx = jobs.FindIndex(j => j.RetainerName == activeName);
             if (firstMatchIdx >= 0)
             {
+                if (collectAutoRestock && firstMatchIdx > 0)
+                {
+                    // Restock targets span all retainers, including those before the smart-start retainer.
+                    var earlier = jobs.GetRange(0, firstMatchIdx);
+                    jobs.RemoveRange(0, firstMatchIdx);
+                    jobs.AddRange(earlier);
+                    firstMatchIdx = 0;
+                }
                 jobCursor = firstMatchIdx;
                 pendingFetchJobs -= jobs.Take(firstMatchIdx).Count(j => j.FetchPrices);
                 EnterJob();
@@ -538,6 +558,7 @@ public sealed unsafe class Executor : IDisposable
     private void Stop(string reason)
     {
         CaptureListingsAfterActions();
+        PrintAutoRestockResults();
         pendingReprice = null;
         handover = null;
         fetchRows = null;
@@ -639,15 +660,24 @@ public sealed unsafe class Executor : IDisposable
     /// </summary>
     private void TickPreStagingSaddle()
     {
-        // (item, hq) ごとの必要総量
-        var needs = new Dictionary<(uint itemId, bool isHQ), int>();
-        foreach (var a in currentJobActions)
+        if (pendingAutoStage is { } pending && lastStageAt is { } stagedAt)
         {
-            if (a.Kind != PlannedActionKind.NewListing) continue;
-            if (!a.SourceKey.EndsWith(".saddle")) continue;
-            var k = (a.ItemId, a.IsHQ);
-            needs[k] = (needs.TryGetValue(k, out var v) ? v : 0) + a.Quantity;
+            if (TotalInCharBag(pending.Item.ItemId, pending.Item.IsHq) <= pending.InBag)
+            {
+                // A rejected move can leave the same stack available. Wait for it to settle,
+                // then skip that item's staging so an unattended cycle can continue.
+                var remaining = SaddleSettleAfterStage - (DateTime.UtcNow - stagedAt);
+                if (remaining > TimeSpan.Zero) { Wait(remaining); return; }
+                failedAutoStages.Add(pending.Item);
+                log.Warning($"[Restocker] auto-restock saddle move not confirmed: item={pending.Item.ItemId} hq={pending.Item.IsHq}");
+            }
+            pendingAutoStage = null;
         }
+
+        var canStage = !autoRestockPass || (AddonHelper.IsOpen("RetainerSellList") && currentJobActions.Peek().RetainerKey == ActiveRetainerKey());
+        var actions = autoRestockPass ? currentJobActions.Where(a => canStage && CanAutoRestock(a)) : currentJobActions;
+        var laterActions = autoRestockPass ? jobs.Skip(jobCursor + 1).SelectMany(j => j.Actions).Where(CanAutoRestock) : null;
+        var needs = RestockPlanner.SaddleStagingNeeds(actions, laterActions);
 
         var im = InventoryManager.Instance();
         if (im == null) { Stop("InventoryManager null"); return; }
@@ -655,16 +685,18 @@ public sealed unsafe class Executor : IDisposable
         // 1 種類でも不足していれば 1 saddle slot を bag に運んで return
         foreach (var (k, need) in needs)
         {
-            var inBag = TotalInCharBag(k.itemId, k.isHQ);
+            if (failedAutoStages.Contains(k)) continue;
+            var inBag = TotalInCharBag(k.ItemId, k.IsHq);
             if (inBag >= need) continue;
 
-            log.Information($"[Restocker] pre-stage need item={k.itemId} hq={k.isHQ} need={need} inBag={inBag}, moving 1 saddle slot");
-            if (!StageOneSaddleSlot(k.itemId, k.isHQ))
+            log.Information($"[Restocker] pre-stage need item={k.ItemId} hq={k.IsHq} need={need} inBag={inBag}, moving 1 saddle slot");
+            if (!StageOneSaddleSlot(k.ItemId, k.IsHq))
             {
-                log.Warning($"[Restocker] pre-stage cannot stage item={k.itemId} hq={k.isHQ} (no saddle slot or no free bag slot). Continuing with what we have.");
+                log.Warning($"[Restocker] pre-stage cannot stage item={k.ItemId} hq={k.IsHq} (no saddle slot or no free bag slot). Continuing with what we have.");
                 continue;
             }
             lastStageAt = DateTime.UtcNow;
+            if (autoRestockPass) pendingAutoStage = (k, inBag);
             // server 側のトランザクションを待つ
             Wait(TimeSpan.FromMilliseconds(1000));
             return;
@@ -864,6 +896,9 @@ public sealed unsafe class Executor : IDisposable
     {
         jobObserved = false;
         listedRetainerKey = null;
+        lastStageAt = null;
+        pendingAutoStage = null;
+        failedAutoStages.Clear();
         currentJobActions.Clear();
         foreach (var a in jobs[jobCursor].Actions) currentJobActions.Enqueue(a);
         fetchRows = null;
@@ -1102,10 +1137,11 @@ public sealed unsafe class Executor : IDisposable
                     var sellList = AddonHelper.GetVisible("RetainerSellList");
                     var retLarge = AddonHelper.GetVisible("InventoryRetainerLarge");
                     log.Information($"[Restocker] NewListing: RetainerSellList visible={sellList != null}, InventoryRetainerLarge visible={retLarge != null}, item={action.ItemId} hq={action.IsHQ} qty={action.Quantity} price={action.UnitPrice} src={action.SourceKey}");
-                    if (sellList == null)
+                    if (sellList == null || (autoRestockPass && (!CanAutoRestock(action) || ActiveRetainerKey() != action.RetainerKey)))
                     {
-                        log.Warning("[Restocker] NewListing: RetainerSellList is not open, cannot list");
+                        log.Warning("[Restocker] NewListing: sell list, target retainer, or auto-restock settings no longer permit listing");
                         currentJobActions.Dequeue();
+                        CompletedActions++;
                         Throttle();
                         return;
                     }
@@ -1117,6 +1153,7 @@ public sealed unsafe class Executor : IDisposable
                     {
                         log.Warning($"[Restocker] NewListing skip (direct listing failed): item={action.ItemId} hq={action.IsHQ}");
                         currentJobActions.Dequeue();
+                        CompletedActions++;
                         Throttle();
                         return;
                     }
@@ -1422,9 +1459,9 @@ public sealed unsafe class Executor : IDisposable
         // usedMarketSlots に入っているスロットは「ついさっき使った」のでサーバ反映前
         // でもターゲットしないことで swap 動作を防ぐ。
         var market = im->GetInventoryContainer(InventoryType.RetainerMarket);
-        if (market == null) return false;
+        if (market == null || (autoRestockPass && !market->IsLoaded)) return false;
         var dstSlot = -1;
-        for (var i = 0; i < market->Size; i++)
+        for (var i = 0; i < Math.Min(market->Size, Planner.MaxListingSlots); i++)
         {
             if (usedMarketSlots.Contains(i)) continue;
             var s = market->GetInventorySlot(i);
@@ -1434,12 +1471,12 @@ public sealed unsafe class Executor : IDisposable
         if (dstSlot < 0) { log.Warning("[Restocker] no free RetainerMarket slot"); return false; }
 
         var sourceKey = string.IsNullOrEmpty(action.SourceKey) ? action.RetainerKey : action.SourceKey;
-        var candidates = ResolveSearchOrder(sourceKey);
+        var candidates = autoRestockPass ? SourceContainersFor(sourceKey) : ResolveSearchOrder(sourceKey);
 
         foreach (var t in candidates)
         {
             var c = im->GetInventoryContainer(t);
-            if (c == null) continue;
+            if (c == null || (autoRestockPass && !c->IsLoaded)) continue;
             for (var i = 0; i < c->Size; i++)
             {
                 var item = c->GetInventorySlot(i);
@@ -1820,12 +1857,21 @@ public sealed unsafe class Executor : IDisposable
         if (slot != null && slot->ItemId == pendingListingItemId && slot->Quantity >= pendingListingQuantity)
         {
             var hq = (slot->Flags & InventoryItem.ItemFlags.HighQuality) != 0;
-            if (hq == pendingListingIsHQ)
+            var action = currentJobActions.Peek();
+            if (hq == pendingListingIsHQ && (!autoRestockPass || (ActiveRetainerKey() == action.RetainerKey
+                && im->GetRetainerMarketPrice((short)pendingListingSlot) == (ulong)action.UnitPrice)))
             {
-                listedRetainerKey = currentJobActions.Peek().RetainerKey;
+                listedRetainerKey = action.RetainerKey;
+                if (autoRestockPass)
+                {
+                    var key = (action.ItemId, action.IsHQ);
+                    var result = autoRestockResults[key];
+                    autoRestockResults[key] = (result.Kind, result.Price, result.Quantity + action.Quantity);
+                }
                 CompletedActions++;
                 currentJobActions.Dequeue();
                 pendingListingSlot = -1;
+                waitingSince = null;
                 State = ExecutionState.PerformingAction;
                 Throttle();
                 return;
@@ -1837,6 +1883,7 @@ public sealed unsafe class Executor : IDisposable
         {
             log.Warning($"[Restocker] new listing not confirmed in market#{pendingListingSlot} for item={pendingListingItemId} hq={pendingListingIsHQ} qty={pendingListingQuantity} (server lag or rejected). Skipping.");
             currentJobActions.Dequeue();
+            CompletedActions++;
             pendingListingSlot = -1;
             waitingSince = null;
             State = ExecutionState.PerformingAction;
@@ -1912,6 +1959,16 @@ public sealed unsafe class Executor : IDisposable
     {
         CaptureListingsAfterActions();
         var addon = AddonHelper.GetVisible("RetainerSellList");
+        if (addon != null && collectAutoRestock && !autoRestockPass && configuration.AutoRestockDuringCycle)
+        {
+            try
+            {
+                var snapshot = Plugin.Instance.RetainerWatcher.CaptureActiveRetainerSnapshot(authoritative: true);
+                if (snapshot != null && snapshot.RetainerName == jobs[jobCursor].RetainerName)
+                    autoRestockSnapshots[snapshot.Key] = snapshot;
+            }
+            catch (Exception ex) { log.Warning(ex, "[Restocker] auto-restock snapshot capture failed"); }
+        }
         if (addon == null)
         {
             // 既に閉じている = OK
@@ -2051,6 +2108,13 @@ public sealed unsafe class Executor : IDisposable
         jobCursor++;
         if (jobCursor >= jobs.Count)
         {
+            if (TryQueueAutoRestock())
+            {
+                State = ExecutionState.SelectingRetainer;
+                Throttle();
+                return;
+            }
+            PrintAutoRestockResults();
             State = ExecutionState.Done;
             log.Info($"[Restocker] Executor done: {CompletedJobs} retainers, {CompletedActions} actions");
             // Full cycles print their own summary + lines (AutoCycleController); everything else here.
@@ -2063,6 +2127,61 @@ public sealed unsafe class Executor : IDisposable
         }
         State = ExecutionState.SelectingRetainer;
         Throttle();
+    }
+
+    private bool TryQueueAutoRestock()
+    {
+        if (!collectAutoRestock || autoRestockPass || !configuration.AutoRestockDuringCycle) return false;
+        if (autoRestockSnapshots.Count != jobs.Count)
+        {
+            Plugin.ChatPrint(Strings.AutoRestockIncompleteSnapshots);
+            return false;
+        }
+
+        Plugin.Instance.RetainerWatcher.CaptureCharacterSnapshot();
+        configuration.Characters.TryGetValue(CharacterSnapshot.MakeKey(Plugin.PlayerState.ContentId), out var character);
+        var plans = AutoRestockPlanner.Plan(configuration.LowStock, autoRestockSnapshots.Values, character,
+            Plugin.Instance.Tracker.Tracker, marketCache, DateTime.UtcNow, configuration.AutoRestockMaxScanAgeHours,
+            configuration.UndercutGil, configuration.IsHeld, AutoRestockFloor);
+        foreach (var plan in plans)
+        {
+            if (plan.Actions.Count == 0)
+                Plugin.ChatPrint(string.Format(Strings.AutoRestockSkipped, AutoRestockItemName(plan.ItemId, plan.IsHq),
+                    Strings.AutoRestockPriceLabel(plan.PriceKind)));
+            else
+                autoRestockResults[(plan.ItemId, plan.IsHq)] = (plan.PriceKind, plan.Actions[0].UnitPrice, 0);
+        }
+
+        foreach (var group in plans.SelectMany(p => p.Actions).GroupBy(a => a.RetainerKey))
+        {
+            var actions = group.ToList();
+            jobs.Add(new RetainerVisitJob { RetainerName = autoRestockSnapshots[group.Key].RetainerName, Actions = actions });
+            TotalActions += actions.Count;
+        }
+        autoRestockPass = jobCursor < jobs.Count;
+        return autoRestockPass;
+    }
+
+    private long AutoRestockFloor(uint itemId, bool hq) => configuration.EffectiveFloorFor(itemId, hq, costLedger).Price;
+
+    private bool CanAutoRestock(PlannedAction action) => configuration.AutoRestockDuringCycle
+        && !configuration.IsHeld(action.ItemId, action.IsHQ)
+        && AutoRestockPlanner.IsValidPrice(action.UnitPrice, AutoRestockFloor(action.ItemId, action.IsHQ));
+
+    private static string AutoRestockItemName(uint itemId, bool hq)
+    {
+        var name = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Item>().TryGetRow(itemId, out var row)
+            ? row.Name.ExtractText() : $"#{itemId}";
+        return hq ? $"{name} ({Strings.QualityHq})" : name;
+    }
+
+    private void PrintAutoRestockResults()
+    {
+        foreach (var (key, result) in autoRestockResults)
+            if (result.Quantity > 0)
+                Plugin.ChatPrint(string.Format(Strings.AutoRestocked, AutoRestockItemName(key.ItemId, key.IsHq),
+                    result.Quantity, result.Price, Strings.AutoRestockPriceLabel(result.Kind)));
+        autoRestockResults.Clear();
     }
 
     /// <summary>RetainerManager から DisplayOrder 順に並べた現役リテイナー名リスト。</summary>

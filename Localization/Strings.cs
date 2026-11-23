@@ -1,4 +1,5 @@
 using Restocker.Market;
+using Restocker.Plan;
 
 namespace Restocker.Localization;
 
@@ -67,6 +68,24 @@ public static class Strings
             : T("Drop of {0:0.##}% ({1:N0} → {2:N0}) exceeds the max drop limit. Check before applying.", "{0:0.##}% の値下げ（{1:N0} → {2:N0}）は上限を超えています。適用前に確認してください。", "Senkung um {0:0.##}% ({1:N0} → {2:N0}) überschreitet das Limit. Vor dem Anwenden prüfen.", "La baisse de {0:0.##} % ({1:N0} → {2:N0}) dépasse la limite. Vérifiez avant d’appliquer.", "跌幅 {0:0.##}%（{1:N0} → {2:N0}）超过上限。请在应用前确认。", "{0:0.##}% 인하({1:N0} → {2:N0})가 한도를 초과합니다. 적용 전에 확인하세요.");
         return string.Format(format, System.Math.Abs(RepriceRules.ChangePercent(oldPrice, newPrice)), oldPrice, newPrice);
     }
+
+    // Fork: automated low-stock restocking.
+    public static string AutoRestockSetting => T("Auto-restock low stock during Full/Auto cycle", "全巡回・自動巡回で在庫不足を補充", "Niedrige Bestände bei Voll-/Auto-Zyklen auffüllen", "Réapprovisionner les stocks bas pendant les cycles complets/auto", "完整／自动循环时补充低库存", "전체/자동 주기 중 부족 재고 자동 보충");
+    public static string AutoRestockScanAgeSetting => T("Auto-restock market scan max age (hours, 0 = off)", "補充に使う相場の有効時間（0で無効）", "Max. Alter der Marktabfrage (Stunden, 0 = aus)", "Âge max. du relevé pour le réassort (heures, 0 = désactivé)", "补货行情最长有效期（小时，0 为关闭）", "자동 보충 시세 유효 시간 (0 = 끄기)");
+    public static string AutoRestocked => T("Restocked {0} {1:N0}x @ {2:N0} ({3})", "{0} を {1:N0} 個補充（単価 {2:N0}、{3}）", "{0} {1:N0}× zu {2:N0} aufgefüllt ({3})", "{0} réapprovisionné, {1:N0}× à {2:N0} ({3})", "已补货 {0} {1:N0} 件，单价 {2:N0}（{3}）", "{0} {1:N0}개 보충, 개당 {2:N0} ({3})");
+    public static string AutoRestockSkipped => T("Skipped auto-restock for {0} ({1})", "{0} の自動補充をスキップ（{1}）", "Auto-Auffüllen für {0} übersprungen ({1})", "Réapprovisionnement auto de {0} ignoré ({1})", "已跳过 {0} 的自动补货（{1}）", "{0} 자동 보충 건너뜀 ({1})");
+    public static string AutoRestockIncompleteSnapshots => T("Skipped auto-restock because some retainer listings could not be read.", "一部のリテイナーの出品を読み取れなかったため、自動補充をスキップしました。", "Auto-Auffüllen übersprungen, da Gehilfenangebote nicht gelesen werden konnten.", "Réapprovisionnement auto ignoré car certaines offres des servants étaient illisibles.", "无法读取部分雇员的挂单，已跳过自动补货。", "일부 집사의 판매 목록을 읽을 수 없어 자동 보충을 건너뛰었습니다.");
+    public static string LowStockListing => T("{0}: listing {1:N0} unit(s) in {2:N0} listing(s) at {3:N0}", "{0} を {1:N0} 個、{2:N0} 件で出品（単価 {3:N0}）", "{0}: {1:N0} Stück in {2:N0} Angeboten zu {3:N0}", "{0} : {1:N0} unités en {2:N0} offres à {3:N0}", "{0}：{1:N0} 件分为 {2:N0} 单上架，单价 {3:N0}", "{0}: {1:N0}개를 {2:N0}건으로 등록, 개당 {3:N0}");
+
+    internal static string AutoRestockPriceLabel(AutoRestockPriceKind kind) => kind switch
+    {
+        AutoRestockPriceKind.Listing => T("current listing", "現在の出品", "aktuelles Angebot", "offre actuelle", "当前挂单", "현재 매물"),
+        AutoRestockPriceKind.Market => T("market scan", "相場情報", "Marktabfrage", "relevé du marché", "行情扫描", "시세 조회"),
+        AutoRestockPriceKind.LastSale => T("last sale", "前回の販売", "letzter Verkauf", "dernière vente", "最近成交", "최근 판매"),
+        AutoRestockPriceKind.UnknownListingPrice => T("current listing price unavailable", "現在の出品価格が不明", "aktueller Angebotspreis unbekannt", "prix de l’offre actuelle inconnu", "无法读取当前挂单价格", "현재 매물 가격을 알 수 없음"),
+        AutoRestockPriceKind.NoMarketOrSale => T("no fresh same-quality market price or recorded sale price", "同品質の新しい相場や販売価格の記録がない", "kein aktueller Markt- oder Verkaufspreis derselben Qualität", "aucun prix récent du marché ou de vente pour cette qualité", "没有同品质的近期行情或成交价", "같은 품질의 최신 시세나 판매 가격이 없음"),
+        _ => T("price or floor outside the supported range", "価格または最低価格が範囲外", "Preis oder Mindestpreis außerhalb des gültigen Bereichs", "prix ou plancher hors limites", "价格或底价超出范围", "가격 또는 최저가가 허용 범위를 벗어남"),
+    };
 
     // Fork: sale history capture and display.
     public static string FetchSaleHistory => T("Read sale history when visiting retainers", "リテイナー巡回時に販売履歴を取得", "Verkaufsverlauf bei Gehilfenbesuchen abrufen", "Lire l’historique des ventes lors des visites aux servants", "访问雇员时读取出售记录", "집사 방문 시 판매 내역 조회");

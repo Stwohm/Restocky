@@ -242,9 +242,11 @@ public sealed class LowStockTab
             lastMessage = $"{ItemName(e.ItemId)}: nothing to list: {why}";
             return;
         }
-        // Direct: the row already shows item, units and price; no extra confirm dialog.
-        lastMessage = $"{ItemName(e.ItemId)}: listing {actions.Sum(a => a.Quantity)} unit(s) in {actions.Count} listing(s) at {price:N0}";
-        Plugin.ChatPrint(lastMessage);
-        executor.StartApplyActions(actions);
+        confirmDialog.Request(actions, list =>
+        {
+            lastMessage = string.Format(Strings.LowStockListing, ItemName(e.ItemId), list.Sum(a => a.Quantity), list.Count, price);
+            Plugin.ChatPrint(lastMessage);
+            executor.StartApplyActions(list);
+        });
     }
 }

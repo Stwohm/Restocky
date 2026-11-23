@@ -64,16 +64,16 @@ public sealed unsafe class RetainerWatcher : IDisposable
         }
     }
 
-    public void CaptureActiveRetainerSnapshot(bool authoritative = false)
+    public RetainerSnapshot? CaptureActiveRetainerSnapshot(bool authoritative = false)
     {
         var retainerManager = RetainerManager.Instance();
-        if (retainerManager == null || !retainerManager->IsReady) return;
+        if (retainerManager == null || !retainerManager->IsReady) return null;
 
         var active = retainerManager->GetActiveRetainer();
-        if (active == null || active->RetainerId == 0) return;
+        if (active == null || active->RetainerId == 0) return null;
 
         var characterId = playerState.ContentId;
-        if (characterId == 0) return;
+        if (characterId == 0) return null;
 
         var localPlayer = objectTable.LocalPlayer;
         var snapshot = new RetainerSnapshot
@@ -87,7 +87,7 @@ public sealed unsafe class RetainerWatcher : IDisposable
         };
         snapshot.Key = RetainerSnapshot.MakeKey(snapshot.CharacterContentId, snapshot.RetainerId);
         snapshot.Listings = ReadListings(out var marketLoaded);
-        if (!marketLoaded) return;
+        if (!marketLoaded) return null;
         snapshot.Inventory = ReadInventory();
         LastSeen = snapshot;
 
@@ -106,6 +106,7 @@ public sealed unsafe class RetainerWatcher : IDisposable
             snapshot.LastRefreshedUtc, authoritative);
 
         log.Debug($"[Restocker] snapshot updated: {snapshot.RetainerName} listings={snapshot.Listings.Count} inv={snapshot.Inventory.Count}");
+        return snapshot;
     }
 
     private List<ListingEntry> ReadListings(out bool loaded)

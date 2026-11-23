@@ -31,7 +31,15 @@ Fork changes and where they live:
   cycle at the bell, never persisted, stops on leave bell / move / combat / duty / cutscene /
   zone / duty pop / user cancel / N failures, always prints the reason to chat.
 - This deliberately relaxes upstream's "only write game state behind Apply + confirm" rule for the
-  two cycle paths. The manual tabs keep the confirm dialog.
+  two cycle paths. With **Auto-restock low stock during Full/Auto cycle** enabled (off by default),
+  the same exception covers new listings in one restock pass after all retainers have been repriced.
+  Low Stock thresholds and targets count units across the current character's retainers. The pass
+  uses refreshed listings to plan quantities and free slots once, skips held item+quality pairs,
+  and uses the existing listing executor and saddlebag pacing. Pricing uses the lowest current
+  same-quality listing we own, then a same-quality market scan younger than the configured limit
+  (6 hours by default), then the last recorded same-quality sale. The effective floor applies to
+  all prices. Manual Apply keeps its confirm dialog, and the Low Stock price handover uses the
+  game's confirmation.
 - **Dialog item names** (`Common/DialogItemName.cs`, tested): node text is decoded as a SeString.
   Raw bytes leaked macro remnants ("...Materia VIH") and the substring fallback picked the next
   materia tier, so the market answer was ignored and the row timed out.
@@ -220,5 +228,5 @@ dotnet build -c Release
 - Don't trust the snapshot's `ItemId` after a row click — read the dialog's `ItemName` and reverse-resolve.
 - Don't drop the 800ms cooldown between listings or the 3s saddle settle — they exist because the server sometimes re-delivers prior request offerings into a fresh fetch.
 - Don't ship a PNG icon without sRGB + gAMA + pHYs chunks. The Dalamud installer leaves the icon slot blank otherwise. (Recipe lives in `..\GilDelta` git history.)
-- Don't write to game state outside of an `Apply`-button-confirmed path. The plan-then-apply pattern is the contract; bypassing it removes user undo.
+- Keep game writes behind manual confirmation or the Full/Auto cycle exceptions in the fork section.
 - Don't expand `AddonText` predicates speculatively. Add a language-specific phrase only when a `/xllog` dump shows the predicate failing on a real menu in that locale.

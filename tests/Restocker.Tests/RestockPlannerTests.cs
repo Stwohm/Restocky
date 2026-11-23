@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Linq;
+using Restocker.Data;
 using Restocker.Plan;
 
 namespace Restocker.Tests;
@@ -83,6 +84,23 @@ public class RestockPlannerTests
         var sources = new[] { new RestockSource("A", "A", 9) };
         Assert.Empty(RestockPlanner.Plan(1, false, 3, 3, 1, 10, sources, Free()));
         Assert.Empty(RestockPlanner.Plan(1, false, 3, 0, 1, 0, sources, Free()));
+    }
+
+    [Fact]
+    public void Saddle_staging_covers_current_and_later_bag_listings_of_the_same_quality()
+    {
+        static PlannedAction Listing(string source, int qty, bool hq = false) => new()
+        {
+            Kind = PlannedActionKind.NewListing, ItemId = Twine, SourceKey = source, Quantity = qty, IsHQ = hq,
+        };
+
+        var needs = RestockPlanner.SaddleStagingNeeds(
+            [Listing("A", 9), Listing("char.1.bag", 2), Listing("char.1.saddle", 3), Listing("char.1.bag", 9, hq: true)],
+            [Listing("char.1.bag", 4), Listing("char.1.saddle", 9)]);
+
+        var need = Assert.Single(needs);
+        Assert.Equal((Twine, false), need.Key);
+        Assert.Equal(9, need.Value);
     }
 
     [Fact]
