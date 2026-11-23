@@ -3,6 +3,7 @@ using System.Numerics;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Plugin.Services;
 using Restocker.Common;
+using Restocker.Localization;
 
 namespace Restocker.Execution;
 
@@ -49,7 +50,7 @@ public sealed class AutoCycleController : IDisposable
     public DateTime? NextRunUtc { get; private set; }
     public int ConsecutiveFailures { get; private set; }
     public string? LastSummary { get; private set; }
-    public bool CycleRunning => cycleRunning;
+    public bool CycleRunning => cycleRunning || ar.HasPostprocess;
 
     /// <summary>Max distance (yalms) the player may drift from where the loop was turned on.</summary>
     private const float MoveTolerance = 1.0f;
@@ -77,10 +78,26 @@ public sealed class AutoCycleController : IDisposable
         framework.Update += Tick;
     }
 
+    internal void ListenForPostprocess() => ar.ListenForPostprocess(
+        () => configuration.RunFullCycleAfterAutoRetainer && !CycleRunning && !executor.IsRunning, StartPostprocess);
+
     public void Dispose()
     {
         framework.Update -= Tick;
-        ar.Release();
+        try
+        {
+            framework.RunOnFrameworkThread(() =>
+            {
+                try { executor.EndAutoRetainerCycle(Strings.AutoRetainerCycleStopped); }
+                finally { ar.StopListeningForPostprocess(); }
+            }).GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            log.Warning(ex, "[Restocker] AutoRetainer postprocess cleanup failed during dispose");
+            ar.StopListeningForPostprocess();
+        }
+        finally { ar.Release(); }
     }
 
     private ulong ContentId() => Plugin.PlayerState.ContentId;
@@ -92,7 +109,7 @@ public sealed class AutoCycleController : IDisposable
     /// <summary>One full cycle now (the manual "one click" button). Does not turn the loop on.</summary>
     public bool RunOnce()
     {
-        if (executor.IsRunning) return false;
+        if (CycleRunning || executor.IsRunning) return false;
         if (!IsBellOpen()) { Print("open the summoning bell first."); return false; }
         if (ar.Read(ContentId()) is { Busy: true })
         {
@@ -142,14 +159,19 @@ public sealed class AutoCycleController : IDisposable
     /// <summary>Interval changed in the UI: count down the new interval from now.</summary>
     public void RestartCountdown()
     {
-        if (!Enabled || cycleRunning) return;
+        if (!Enabled || CycleRunning) return;
         NextRunUtc = DateTime.UtcNow + Interval();
     }
 
     private void Start(bool auto)
     {
         ar.Suppress();
-        executor.StartFullCycle();
+        try { executor.StartFullCycle(); }
+        catch
+        {
+            ar.Release();
+            throw;
+        }
         if (!executor.IsRunning)
         {
             ar.Release();
@@ -170,14 +192,67 @@ public sealed class AutoCycleController : IDisposable
         NextRunUtc = DateTime.UtcNow + Interval() + TimeSpan.FromSeconds(offset);
     }
 
+    private bool StartPostprocess(string retainerName)
+    {
+        if (!configuration.RunFullCycleAfterAutoRetainer || cycleRunning || executor.IsRunning) return false;
+        if (UnsafeReason() != null || !executor.StartAutoRetainerCycle(retainerName))
+        {
+            log.Information($"[Restocker] AutoRetainer postprocess skipped for '{retainerName}'");
+            return false;
+        }
+        nextArPollUtc = DateTime.UtcNow + TimeSpan.FromSeconds(1);
+        return true;
+    }
+
+    private void FinishPostprocess(string? reason = null)
+    {
+        try { executor.EndAutoRetainerCycle(reason ?? Strings.AutoRetainerCycleStopped); }
+        catch (Exception ex) { log.Warning(ex, "[Restocker] AutoRetainer postprocess menu cleanup failed"); }
+        finally { ar.FinishPostprocess(); }
+
+        arLastBusyUtc = DateTime.UtcNow;
+        arWaitSinceUtc = null;
+        bellReopenAtUtc = null;
+        WaitingReason = null;
+        // Count the handoff as the timed cycle. Per-retainer durations aren't samples for the all-retainer gate.
+        RestartCountdown();
+
+        if (executor.State == ExecutionState.Done && reason == null)
+        {
+            ConsecutiveFailures = 0;
+            LastSummary = string.Format(Strings.AutoRetainerCycleDone, executor.RepricesApplied, executor.RepricesSkipped);
+            Print(LastSummary);
+            executor.PrintRepriceLines();
+        }
+        else
+        {
+            LastSummary = reason ?? Strings.AutoRetainerCycleStopped;
+            Print(LastSummary);
+            if (executor.StatusMessage == "cancelled") Disable("run cancelled by user");
+        }
+    }
+
     private void Tick(IFramework _)
     {
         var now = DateTime.UtcNow;
-        if (now < nextPollUtc) return;
-        nextPollUtc = now + TimeSpan.FromMilliseconds(250);
-
         try
         {
+            if (ar.HasPostprocess)
+            {
+                if (!executor.IsRunning) FinishPostprocess();
+                else if (ar.PostprocessTimedOut) FinishPostprocess(Strings.AutoRetainerCycleTimeout);
+                else if (!configuration.RunFullCycleAfterAutoRetainer || UnsafeReason() != null)
+                    FinishPostprocess(Strings.AutoRetainerCycleStopped);
+                else if (now >= nextArPollUtc)
+                {
+                    nextArPollUtc = now + TimeSpan.FromSeconds(1);
+                    if (ar.PostprocessInterrupted()) FinishPostprocess(Strings.AutoRetainerCycleStopped);
+                }
+                return;
+            }
+
+            if (now < nextPollUtc) return;
+            nextPollUtc = now + TimeSpan.FromMilliseconds(250);
             if (cycleRunning && !executor.IsRunning) FinishCycle();
             if (!Enabled) return;
 
@@ -195,6 +270,7 @@ public sealed class AutoCycleController : IDisposable
         catch (Exception ex)
         {
             log.Error(ex, "[Restocker] auto cycle tick exception");
+            if (ar.HasPostprocess) FinishPostprocess(Strings.AutoRetainerCycleStopped);
             Disable($"internal error ({ex.GetType().Name})");
         }
     }
@@ -301,8 +377,7 @@ public sealed class AutoCycleController : IDisposable
         }
     }
 
-    /// <summary>Null when it is safe to keep the loop on, otherwise why it must stop.</summary>
-    private string? StopReason()
+    private string? UnsafeReason()
     {
         if (condition[ConditionFlag.InCombat]) return "combat";
         if (condition[ConditionFlag.BoundByDuty] || condition[ConditionFlag.BoundByDuty56] || condition[ConditionFlag.BoundByDuty95])
@@ -312,7 +387,14 @@ public sealed class AutoCycleController : IDisposable
         if (condition[ConditionFlag.BetweenAreas] || condition[ConditionFlag.BetweenAreas51])
             return "zone change";
         if (AddonHelper.IsOpen("ContentsFinderConfirm")) return "duty pop";
+        return null;
+    }
 
+    /// <summary>Null when it is safe to keep the loop on, otherwise why it must stop.</summary>
+    private string? StopReason()
+    {
+        var unsafeReason = UnsafeReason();
+        if (unsafeReason != null) return unsafeReason;
         var pos = PlayerPosition();
         if (pos == null) return "no local player";
         if (Vector3.Distance(pos.Value, anchor) > MoveTolerance) return "player moved";

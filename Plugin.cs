@@ -127,6 +127,7 @@ public sealed class Plugin : IDalamudPlugin
         // 設定タブは MainWindow 内にあるので OpenConfigUi も同じウィンドウへ
         PluginInterface.UiBuilder.OpenConfigUi += ToggleMainUi;
         gilhoundBridge = new(PluginInterface.GetPluginConfigDirectory());
+        AutoCycle.ListenForPostprocess();
     }
 
     private void MigrateCostFloorOverrides()
@@ -151,6 +152,7 @@ public sealed class Plugin : IDalamudPlugin
 
     public void Dispose()
     {
+        AutoCycle.Dispose();
         PluginInterface.UiBuilder.Draw -= WindowSystem.Draw;
         PluginInterface.UiBuilder.OpenMainUi -= ToggleMainUi;
         PluginInterface.UiBuilder.OpenConfigUi -= ToggleMainUi;
@@ -159,7 +161,6 @@ public sealed class Plugin : IDalamudPlugin
 
         gilhoundBridge.Dispose();
         WindowSystem.RemoveAllWindows();
-        AutoCycle.Dispose();
         LowStock.Dispose();
         MarketWatcher.Dispose();
         SaleHistory.Dispose();

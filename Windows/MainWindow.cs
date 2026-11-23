@@ -316,6 +316,14 @@ public sealed class MainWindow : Window, IDisposable
             configuration.Save();
         }
 
+        var afterAutoRetainer = configuration.RunFullCycleAfterAutoRetainer;
+        if (ImGui.Checkbox(Strings.RunFullCycleAfterAutoRetainer, ref afterAutoRetainer))
+        {
+            configuration.RunFullCycleAfterAutoRetainer = afterAutoRetainer;
+            configuration.Save();
+        }
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.AutoRetainerPostprocessHint);
+
         var autoRestock = configuration.AutoRestockDuringCycle;
         if (ImGui.Checkbox(Strings.AutoRestockSetting, ref autoRestock))
         {

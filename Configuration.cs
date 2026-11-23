@@ -89,6 +89,8 @@ public sealed class Configuration : IPluginConfiguration
     /// <summary>Consecutive failed cycles before the auto cycle turns itself off.</summary>
     public int AutoCycleMaxFailures { get; set; } = 3;
 
+    public bool RunFullCycleAfterAutoRetainer { get; set; }
+
     public bool AutoRestockDuringCycle { get; set; }
     public int AutoRestockMaxScanAgeHours { get; set; } = 6;
 

@@ -1,5 +1,6 @@
 using System;
 using Dalamud.Plugin;
+using Dalamud.Plugin.Ipc;
 using Dalamud.Plugin.Services;
 using Restocker.Execution;
 
@@ -16,15 +17,100 @@ public sealed class AutoRetainerIpc
     private readonly IPluginLog log;
     private readonly Func<bool> isLoaded;
     private bool suppressedByUs;
+    private readonly AutoRetainerPostprocess postprocess = new();
+    private readonly ICallGateSubscriber<bool> busy;
+    private readonly string pluginName;
+    private readonly ICallGateSubscriber<string, object> postprocessOffer;
+    private readonly ICallGateSubscriber<string, string, object> postprocessGrant;
+    private readonly ICallGateSubscriber<string, object> postprocessRequest;
+    private readonly ICallGateSubscriber<object> postprocessFinish;
+    private Func<bool>? shouldRequestPostprocess;
+    private Func<string, bool>? startPostprocess;
 
     public AutoRetainerIpc(IDalamudPluginInterface pi, IPluginLog log, Func<bool> isLoaded)
     {
         this.pi = pi;
         this.log = log;
         this.isLoaded = isLoaded;
+        pluginName = pi.InternalName;
+        busy = pi.GetIpcSubscriber<bool>("AutoRetainer.PluginState.IsBusy");
+        postprocessOffer = pi.GetIpcSubscriber<string, object>("AutoRetainer.OnRetainerAdditionalTask");
+        postprocessGrant = pi.GetIpcSubscriber<string, string, object>("AutoRetainer.OnRetainerReadyForPostprocess");
+        postprocessRequest = pi.GetIpcSubscriber<string, object>("AutoRetainer.RequestPostprocess");
+        postprocessFinish = pi.GetIpcSubscriber<object>("AutoRetainer.FinishPostprocessRequest");
     }
 
     public bool IsLoaded => isLoaded();
+
+    internal bool HasPostprocess => postprocess.Active;
+    internal bool PostprocessTimedOut => postprocess.TimedOut(Environment.TickCount64);
+
+    internal bool PostprocessInterrupted()
+    {
+        if (!IsLoaded) return true;
+        try { return !busy.InvokeFunc(); }
+        catch (Exception ex)
+        {
+            log.Debug(ex, "[Restocker] AutoRetainer busy state unavailable during postprocess");
+            return false;
+        }
+    }
+
+    internal void ListenForPostprocess(Func<bool> shouldRequest, Func<string, bool> start)
+    {
+        shouldRequestPostprocess = shouldRequest;
+        startPostprocess = start;
+        postprocessGrant.Subscribe(OnPostprocessGrant);
+        postprocessOffer.Subscribe(OnPostprocessOffer);
+    }
+
+    internal void StopListeningForPostprocess()
+    {
+        shouldRequestPostprocess = null;
+        startPostprocess = null;
+        FinishPostprocess();
+        // AR has no withdraw IPC. If it already accepted a request, keep answering until
+        // that grant is released or the next offer replaces the old request list.
+        if (!postprocess.Pending) UnsubscribePostprocess();
+    }
+
+    private void UnsubscribePostprocess()
+    {
+        postprocessOffer.Unsubscribe(OnPostprocessOffer);
+        postprocessGrant.Unsubscribe(OnPostprocessGrant);
+    }
+
+    private void OnPostprocessOffer(string _)
+    {
+        try
+        {
+            if (postprocess.OnOffer(shouldRequestPostprocess?.Invoke() == true))
+                postprocessRequest.InvokeAction(pluginName);
+            else if (shouldRequestPostprocess == null)
+                UnsubscribePostprocess();
+        }
+        catch (Exception ex) { log.Warning(ex, "[Restocker] AutoRetainer postprocess request failed"); }
+    }
+
+    private void OnPostprocessGrant(string owner, string retainerName)
+    {
+        if (!postprocess.OnGrant(owner == pluginName, Environment.TickCount64)) return;
+        var started = false;
+        try { started = startPostprocess?.Invoke(retainerName) == true; }
+        catch (Exception ex) { log.Warning(ex, "[Restocker] AutoRetainer postprocess start failed"); }
+        finally
+        {
+            if (!started) FinishPostprocess();
+            if (startPostprocess == null) UnsubscribePostprocess();
+        }
+    }
+
+    internal void FinishPostprocess()
+    {
+        if (!postprocess.TakeFinish()) return;
+        try { postprocessFinish.InvokeAction(); }
+        catch (Exception ex) { log.Warning(ex, "[Restocker] AutoRetainer postprocess finish failed"); }
+    }
 
     /// <summary>Null when AutoRetainer is not loaded or the IPC answer could not be read.</summary>
     public AutoRetainerState? Read(ulong contentId)
@@ -32,7 +118,7 @@ public sealed class AutoRetainerIpc
         if (!isLoaded()) return null;
         try
         {
-            var busy = pi.GetIpcSubscriber<bool>("AutoRetainer.PluginState.IsBusy").InvokeFunc();
+            var isBusy = busy.InvokeFunc();
             long? secs = null;
             try
             {
@@ -42,7 +128,7 @@ public sealed class AutoRetainerIpc
             catch (Exception ex) { log.Debug(ex, "[Restocker] AR venture seconds unavailable"); }
             var sense = Try(() => pi.GetIpcSubscriber<bool>("AutoRetainer.PluginState.GetOptionRetainerSense").InvokeFunc());
             var multi = Try(() => pi.GetIpcSubscriber<bool>("AutoRetainer.GetMultiModeEnabled").InvokeFunc());
-            return new AutoRetainerState(busy, secs, sense, multi);
+            return new AutoRetainerState(isBusy, secs, sense, multi);
         }
         catch (Exception ex)
         {

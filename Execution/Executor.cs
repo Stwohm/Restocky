@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.UI;
@@ -62,6 +63,8 @@ public sealed unsafe class Executor : IDisposable
     private DateTime historyDeadline;
     private readonly Queue<PlannedAction> currentJobActions = new();
     private bool collectAutoRestock;
+    private string? autoRetainerKey;
+    private bool postprocessOpenedSellList;
     private bool autoRestockPass;
     private readonly Dictionary<string, RetainerSnapshot> autoRestockSnapshots = new();
     private readonly Dictionary<(uint ItemId, bool IsHq), (AutoRestockPriceKind Kind, long Price, int Quantity)> autoRestockResults = new();
@@ -211,16 +214,54 @@ public sealed unsafe class Executor : IDisposable
         if (IsRunning) { log.Warning("[Restocker] Executor.Start while already running"); return; }
         jobs.Clear();
         foreach (var r in ActiveRetainersInDisplayOrder())
-        {
-            jobs.Add(new RetainerVisitJob
-            {
-                RetainerName = r,
-                Actions = new List<PlannedAction>(),
-                FetchPrices = true,
-                AutoPlan = true,
-            });
-        }
+            jobs.Add(FullCycleJob(r));
         Begin(ExecutionMode.FullCycle);
+    }
+
+    private static RetainerVisitJob FullCycleJob(string name) => new()
+    {
+        RetainerName = name,
+        Actions = new List<PlannedAction>(),
+        FetchPrices = true,
+        AutoPlan = true,
+    };
+
+    internal bool StartAutoRetainerCycle(string retainerName)
+    {
+        if (IsRunning || !Plugin.Condition[ConditionFlag.OccupiedSummoningBell]) return false;
+        var key = RetainerHistoryCapture.ActiveKey(out var activeName);
+        if (key == null || activeName != retainerName) return false;
+        jobs.Clear();
+        jobs.Add(FullCycleJob(retainerName));
+        Begin(ExecutionMode.FullCycle, key);
+        return true;
+    }
+
+    internal void EndAutoRetainerCycle(string reason)
+    {
+        if (autoRetainerKey == null) return;
+        try
+        {
+            if (IsRunning) Stop(reason);
+            if (State == ExecutionState.Done || autoRetainerKey != ActiveRetainerKey()) return;
+
+            // Return the menus we opened to AR's quit task, without dismissing its retainer.
+            if (postprocessOpenedSellList)
+            {
+                ContextMenuHelper.Close();
+                foreach (var name in new[] { "ItemSearchResult", "RetainerSell", "RetainerSellList" })
+                {
+                    var addon = AddonHelper.GetVisible(name);
+                    if (addon != null) Callback.Fire(addon, true, -1);
+                }
+            }
+            if (historyRetainerKey != null)
+            {
+                var history = AddonHelper.GetVisible("RetainerHistory");
+                if (history != null) history->Close(true);
+            }
+        }
+        finally { autoRetainerKey = null; }
     }
 
     // ---------------- Fork: restock with price handover ----------------
@@ -426,15 +467,19 @@ public sealed unsafe class Executor : IDisposable
         Begin(ExecutionMode.ApplyActions);
     }
 
-    private void Begin(ExecutionMode mode)
+    private void Begin(ExecutionMode mode, string? postprocessKey = null)
     {
         Mode = mode;
+        autoRetainerKey = postprocessKey;
+        postprocessOpenedSellList = false;
         if (mode == ExecutionMode.FullCycle) baitMatches.BeginCycle();
-        collectAutoRestock = mode == ExecutionMode.FullCycle && configuration.AutoRestockDuringCycle && configuration.LowStock.Count > 0;
+        collectAutoRestock = mode == ExecutionMode.FullCycle && postprocessKey == null
+            && configuration.AutoRestockDuringCycle && configuration.LowStock.Count > 0;
         autoRestockPass = false;
         autoRestockSnapshots.Clear();
         autoRestockResults.Clear();
         historyRequested.Clear();
+        historyRetainerKey = null;
         jobCursor = 0;
         CompletedJobs = 0;
         CompletedActions = 0;
@@ -458,6 +503,13 @@ public sealed unsafe class Executor : IDisposable
         skippedSummaryRows.Clear();
         ListingsHeld = 0;
         if (jobs.Count == 0) { State = ExecutionState.Done; return; }
+
+        if (postprocessKey != null)
+        {
+            State = ExecutionState.AwaitingSelectString;
+            Throttle();
+            return;
+        }
 
         // smart-start: 既に対象リテイナーの SellList を開いている場合は
         // ベル巡回をスキップして直接 PerformingAction から走る
@@ -505,6 +557,13 @@ public sealed unsafe class Executor : IDisposable
 
         try
         {
+            if (autoRetainerKey != null && (!Plugin.Condition[ConditionFlag.OccupiedSummoningBell]
+                || autoRetainerKey != ActiveRetainerKey()))
+            {
+                Stop(Strings.AutoRetainerRetainerUnavailable);
+                return;
+            }
+
             // Fork: retainer greeting / farewell lines ("Talk" box) block every menu until clicked.
             if (TalkHelper.ClickIfVisible())
             {
@@ -557,6 +616,8 @@ public sealed unsafe class Executor : IDisposable
     private void Wait(TimeSpan span) => nextStepNoEarlierThan = DateTime.UtcNow + span;
     private void Stop(string reason)
     {
+        State = ExecutionState.Stopped;
+        StatusMessage = reason;
         CaptureListingsAfterActions();
         PrintAutoRestockResults();
         pendingReprice = null;
@@ -565,8 +626,6 @@ public sealed unsafe class Executor : IDisposable
         fetchRowsPending = false;
         fetchContextMenuRetry.Reset();
         Plugin.Instance?.ClearMarketWatcherExpected();
-        State = ExecutionState.Stopped;
-        StatusMessage = reason;
         log.Warning($"[Restocker] Executor stopped: {reason}");
     }
 
@@ -618,6 +677,7 @@ public sealed unsafe class Executor : IDisposable
     private void TickOpeningSellList()
     {
         if (!SelectStringHelper.ClickEntry(AddonText.IsHaveRetainerSellItemsEntry)) return;
+        if (autoRetainerKey != null) postprocessOpenedSellList = true;
         State = ExecutionState.AwaitingSellList;
         Throttle();
     }
@@ -2091,6 +2151,15 @@ public sealed unsafe class Executor : IDisposable
                 }
             }
             catch (Exception ex) { log.Warning(ex, "[Restocky] Closing sale history failed"); }
+        }
+        if (autoRetainerKey != null)
+        {
+            if (AddonHelper.IsOpen("RetainerSellList") || AddonHelper.IsOpen("RetainerSell")
+                || AddonHelper.IsOpen("ItemSearchResult") || !SelectStringHelper.HasEntry(AddonText.IsQuitEntry)) return;
+            historyRetainerKey = null;
+            CompletedJobs++;
+            State = ExecutionState.Done;
+            return;
         }
         if (!SelectStringHelper.ClickEntry(AddonText.IsQuitEntry)) return;
         historyRetainerKey = null;
