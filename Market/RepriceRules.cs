@@ -59,6 +59,7 @@ public readonly record struct RepriceDecision(
     public bool MarkForReview => Reason is RepriceReason.MaxDrop or RepriceReason.MaxRaise;
     public bool BypassedMaxDrop { get; init; }
     internal bool MatchedBait { get; init; }
+    internal long ClampedFloor { get; init; }
 }
 
 /// <summary>
@@ -116,16 +117,17 @@ public static class RepriceRules
         }
 
         if (target == currentPrice)
-            return new RepriceDecision(target, false, RepriceReason.NoChange, picked);
+            return new RepriceDecision(target, false, RepriceReason.NoChange, picked) { ClampedFloor = reason == RepriceReason.Floor ? floor : 0 };
 
+        var clampedFloor = reason == RepriceReason.Floor ? floor : 0;
         if (LimitExceeded(currentPrice, target, settings.MaxDropPercent, settings.MaxRaisePercent) is { } limit)
         {
             if (matchedBait && limit == RepriceReason.MaxDrop)
-                return new RepriceDecision(target, true, reason, picked) { BypassedMaxDrop = true, MatchedBait = true };
-            return new RepriceDecision(target, false, limit, picked);
+                return new RepriceDecision(target, true, reason, picked) { BypassedMaxDrop = true, MatchedBait = true, ClampedFloor = clampedFloor };
+            return new RepriceDecision(target, false, limit, picked) { ClampedFloor = clampedFloor };
         }
 
-        return new RepriceDecision(target, true, reason, picked) { MatchedBait = matchedBait };
+        return new RepriceDecision(target, true, reason, picked) { MatchedBait = matchedBait, ClampedFloor = clampedFloor };
     }
 
     // Fork: the editor and confirmation check the actual proposal, including manual edits.

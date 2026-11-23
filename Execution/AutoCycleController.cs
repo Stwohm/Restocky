@@ -4,6 +4,7 @@ using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Plugin.Services;
 using Restocker.Common;
 using Restocker.Localization;
+using Restocker.Plan;
 
 namespace Restocker.Execution;
 
@@ -89,8 +90,12 @@ public sealed class AutoCycleController : IDisposable
         {
             framework.RunOnFrameworkThread(() =>
             {
-                try { executor.EndAutoRetainerCycle(Strings.AutoRetainerCycleStopped); }
-                finally { ar.StopListeningForPostprocess(); }
+                try { executor.StopForUnload(); }
+                finally
+                {
+                    try { ar.StopListeningForPostprocess(); }
+                    finally { ar.Release(); }
+                }
             }).GetAwaiter().GetResult();
         }
         catch (Exception ex)
@@ -98,7 +103,7 @@ public sealed class AutoCycleController : IDisposable
             log.Warning(ex, "[Restocker] AutoRetainer postprocess cleanup failed during dispose");
             ar.StopListeningForPostprocess();
         }
-        finally { ar.Release(); }
+        finally { ar.Release(); } // also retries a failed release before the tick subscription is gone
     }
 
     private ulong ContentId() => Plugin.PlayerState.ContentId;
@@ -151,7 +156,7 @@ public sealed class AutoCycleController : IDisposable
         WaitingReason = null;
         arWaitSinceUtc = null;
         bellReopenAtUtc = null;
-        if (cycleRunning && cycleIsAuto && executor.IsRunning) executor.Cancel();
+        if (cycleRunning && cycleIsAuto && executor.IsRunning) executor.Cancel(reason);
         if (!cycleRunning) ar.Release();
         Print($"auto cycle OFF: {reason}");
         log.Information($"[Restocker] auto cycle disabled: {reason}");
@@ -172,7 +177,7 @@ public sealed class AutoCycleController : IDisposable
             Print(LastSummary);
             return;
         }
-        try { executor.StartFullCycle(); }
+        try { executor.StartFullCycle(auto); }
         catch
         {
             ar.Release();
@@ -225,7 +230,9 @@ public sealed class AutoCycleController : IDisposable
         if (executor.State == ExecutionState.Done && reason == null)
         {
             // The handoff cannot perform a character-wide restock. Leave that cycle due.
-            if (!configuration.AutoRestockDuringCycle || configuration.LowStock.Count == 0) RestartCountdown();
+            if (!configuration.AutoRestockDuringCycle
+                || !configuration.LowStock.Exists(e => e.EffectiveRestockMode == StockRestockMode.Auto))
+                RestartCountdown();
             ConsecutiveFailures = 0;
             LastSummary = string.Format(Strings.AutoRetainerCycleDone, executor.RepricesApplied, executor.RepricesSkipped);
             Print(LastSummary);
@@ -260,9 +267,9 @@ public sealed class AutoCycleController : IDisposable
                 return;
             }
 
+            if (cycleRunning && !executor.IsRunning) FinishCycle();
             if (now < nextPollUtc) return;
             nextPollUtc = now + TimeSpan.FromMilliseconds(250);
-            if (cycleRunning && !executor.IsRunning) FinishCycle();
             if (!Enabled) return;
 
             if (now >= nextArPollUtc && ar.IsLoaded)

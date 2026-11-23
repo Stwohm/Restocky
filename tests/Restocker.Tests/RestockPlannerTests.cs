@@ -12,6 +12,18 @@ public class RestockPlannerTests
     private static Dictionary<string, int> Free(int a = 20, int b = 20) => new() { ["A"] = a, ["B"] = b };
 
     [Fact]
+    public void Manual_restock_can_submit_each_row_from_one_stack_within_the_listing_limit()
+    {
+        var character = new CharacterSnapshot { Bag = [
+            new() { ItemId = Twine, Quantity = 3, MaxStackPerListing = 4 },
+            new() { ItemId = Twine, Quantity = 6, MaxStackPerListing = 4 },
+        ] };
+        var sources = AutoRestockPlanner.Sources(Twine, false, [], character);
+        var plan = RestockPlanner.Plan(Twine, false, 9, 0, 9, 100, sources, Free());
+        Assert.Equal(new[] { 3, 4, 2 }, plan.Select(a => a.Quantity));
+    }
+
+    [Fact]
     public void One_listed_restock_to_three_adds_two_from_retainer_bag_first()
     {
         var sources = new[]

@@ -17,6 +17,19 @@ public class ListingTrackerTests
     private static List<LiveListing> L(params LiveListing[] l) => l.ToList();
 
     [Fact]
+    public void A_scan_and_the_current_listing_sizes_are_scoped_to_this_characters_retainers()
+    {
+        var tracker = new ListingTracker();
+        tracker.ObserveRetainer("2.B", "Other", [new(0, 100, false, 99, 1000)], Name, T0);
+        tracker.ObserveRetainer("1.A", "Here", [new(0, 100, false, 3, 1000)], Name, T0);
+        var keys = new HashSet<string> { "1.A" };
+        tracker.ObserveCompetitors(100, false, [new(900, "Rival", 1)], T0, keys);
+        Assert.Equal(3, Assert.Single(tracker.ActiveFor(100, false, keys)).Quantity);
+        Assert.Equal(0, tracker.Records[0].UndercutCount);
+        Assert.Equal(1, tracker.Records[1].UndercutCount);
+    }
+
+    [Fact]
     public void Full_lifecycle_first_price_reprices_undercutters_and_sale()
     {
         var t = new ListingTracker();
@@ -71,12 +84,18 @@ public class ListingTrackerTests
     public void Missing_listing_closes_as_gone_only_after_grace_period()
     {
         var t = new ListingTracker();
+        var keys = new HashSet<string> { K };
         t.ObserveRetainer(K, RetainerA, L(new LiveListing(0, 100, false, 1, 1_000)), Name, T0);
+        Assert.Equal((1, false), t.ListedStock(100, false, keys));
         t.ObserveRetainer(K, RetainerA, L(), Name, T0.AddSeconds(5));
         Assert.Equal(ListingTracker.Active, t.Records[0].Outcome);
+        Assert.Single(t.ActiveListings);
+        Assert.Equal((1, true), t.ListedStock(100, false, keys));
         t.ObserveRetainer(K, RetainerA, L(), Name, T0.AddMinutes(10));
         Assert.Equal(ListingTracker.Gone, t.Records[0].Outcome);
         Assert.Equal(T0.AddSeconds(5), t.Records[0].EndedUtc);
+        Assert.Empty(t.ActiveListings);
+        Assert.Equal((0, false), t.ListedStock(100, false, keys));
     }
 
     [Fact]

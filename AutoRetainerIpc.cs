@@ -75,6 +75,7 @@ public sealed class AutoRetainerIpc
         startPostprocess = null;
         interruptPostprocess = null;
         FinishPostprocess();
+        if (postprocess.FinishPending) FinishPostprocess(); // last chance without the framework retry tick
         // AR has no withdraw IPC. If it already accepted a request, keep answering until
         // that grant is released or the next offer replaces the old request list.
         if (!postprocess.Pending || PostprocessInterrupted()) UnsubscribePostprocess();
@@ -113,7 +114,11 @@ public sealed class AutoRetainerIpc
         finally
         {
             if (!started) FinishPostprocess();
-            if (startPostprocess == null) UnsubscribePostprocess();
+            if (startPostprocess == null)
+            {
+                if (postprocess.FinishPending) FinishPostprocess();
+                UnsubscribePostprocess();
+            }
         }
     }
 

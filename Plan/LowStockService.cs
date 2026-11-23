@@ -9,6 +9,8 @@ using Restocker.Market;
 
 namespace Restocker.Plan;
 
+internal readonly record struct StockSourceReading(string Label, StockReading Reading, bool Provisional = false);
+
 /// <summary>
 /// Fork: low-stock alerts and restock planning for the items in <see cref="Configuration.LowStock"/>.
 /// "Listed" = units on the current character's retainer markets, from the listing tracker (a sale
@@ -22,8 +24,9 @@ public sealed class LowStockService : IDisposable
     private readonly ListingTracker tracker;
     private readonly MarketCache marketCache;
     private readonly CostLedger costLedger;
-    private readonly Dictionary<(uint, bool), bool> notified = new();
+    private readonly Dictionary<(ulong, uint, bool), bool> notified = new();
     private DateTime nextCheckUtc = DateTime.MinValue;
+    private DateTime loginUtc = DateTime.UtcNow;
 
     public LowStockService(IFramework framework, Configuration configuration, ListingTracker tracker, MarketCache marketCache, CostLedger costLedger)
     {
@@ -32,17 +35,24 @@ public sealed class LowStockService : IDisposable
         this.tracker = tracker;
         this.marketCache = marketCache;
         this.costLedger = costLedger;
+        Plugin.ClientState.Login += OnLogin;
         framework.Update += OnUpdate;
     }
 
-    public void Dispose() => framework.Update -= OnUpdate;
+    public void Dispose()
+    {
+        Plugin.ClientState.Login -= OnLogin;
+        framework.Update -= OnUpdate;
+    }
+
+    private void OnLogin() => loginUtc = DateTime.UtcNow;
 
     private static ulong Cid() => Plugin.PlayerState.ContentId;
 
     private IEnumerable<RetainerSnapshot> MyRetainers()
     {
         var cid = Cid();
-        return configuration.Snapshots.Values.Where(s => cid == 0 || s.CharacterContentId == cid);
+        return configuration.Snapshots.Values.Where(s => cid != 0 && s.CharacterContentId == cid);
     }
 
     /// <summary>Watched items at or below their threshold, with the listed count.</summary>
@@ -50,21 +60,23 @@ public sealed class LowStockService : IDisposable
         => configuration.LowStock.Select(e => (e, ListedUnits(e.ItemId, e.IsHq)))
             .Where(x => x.Item2 <= x.e.Threshold).ToList();
 
-    public int ListedUnits(uint itemId, bool hq)
+    public int ListedUnits(uint itemId, bool hq) => ListedStock(itemId, hq).Listed;
+
+    internal (int Listed, bool Provisional) ListedStock(uint itemId, bool hq)
     {
         var keys = MyRetainers().Select(s => s.Key).ToHashSet();
-        return tracker.ActiveFor(itemId, hq).Where(r => keys.Contains(r.RetainerKey)).Sum(r => r.Quantity);
+        return tracker.ListedStock(itemId, hq, keys);
     }
 
     // Fork: match the scope of recorded sales using stock across all tracked characters.
-    public Dictionary<(uint ItemId, bool IsHq), (long Listed, long Available)> GetTrackedStock()
+    public Dictionary<(uint ItemId, bool IsHq), (long Listed, long Available, bool Provisional)> GetTrackedStock()
     {
-        var stock = new Dictionary<(uint, bool), (long Listed, long Available)>();
-        foreach (var listing in tracker.Records.Where(r => r.Outcome == ListingTracker.Active && r.MissingSinceUtc == null))
+        var stock = new Dictionary<(uint, bool), (long Listed, long Available, bool Provisional)>();
+        foreach (var listing in tracker.ActiveListings)
         {
             var key = (listing.ItemId, listing.IsHq);
             var count = stock.GetValueOrDefault(key);
-            stock[key] = (count.Listed + listing.Quantity, count.Available);
+            stock[key] = (count.Listed + listing.Quantity, count.Available, count.Provisional || listing.MissingSinceUtc != null);
         }
 
         var inventory = configuration.Snapshots.Values.SelectMany(s => s.Inventory)
@@ -73,53 +85,130 @@ public sealed class LowStockService : IDisposable
         {
             var key = (item.ItemId, item.IsHQ);
             var count = stock.GetValueOrDefault(key);
-            stock[key] = (count.Listed, count.Available + item.Quantity);
+            stock[key] = (count.Listed, count.Available + item.Quantity, count.Provisional);
         }
         return stock;
     }
 
     public List<RestockSource> Sources(uint itemId, bool hq)
-    {
-        var list = new List<RestockSource>();
-        foreach (var s in MyRetainers())
-        {
-            var n = s.Inventory.Where(e => e.IsListable && e.ItemId == itemId && e.IsHQ == hq).Sum(e => e.Quantity);
-            if (n > 0) list.Add(new RestockSource(s.Key, s.Key, n));
-        }
-        if (configuration.Characters.TryGetValue(CharacterSnapshot.MakeKey(Cid()), out var ch))
-        {
-            var prefix = CharacterSnapshot.MakeKey(ch.CharacterContentId);
-            var bag = ch.Bag.Where(e => e.IsListable && e.ItemId == itemId && e.IsHQ == hq).Sum(e => e.Quantity);
-            if (bag > 0) list.Add(new RestockSource(prefix + ".bag", null, bag));
-            var saddle = ch.Saddlebag.Concat(ch.PremiumSaddlebag).Where(e => e.IsListable && e.ItemId == itemId && e.IsHQ == hq).Sum(e => e.Quantity);
-            if (saddle > 0) list.Add(new RestockSource(prefix + ".saddle", null, saddle));
-        }
-        return list;
-    }
+        => AutoRestockPlanner.Sources(itemId, hq, MyRetainers(),
+            configuration.Characters.GetValueOrDefault(CharacterSnapshot.MakeKey(Cid())));
 
     public int PerListing(LowStockEntry e)
-        => RestockPlanner.PerListing(e, tracker.ActiveFor(e.ItemId, e.IsHq).Select(r => r.Quantity));
+        => RestockPlanner.PerListing(e, tracker.ActiveFor(e.ItemId, e.IsHq, MyRetainers().Select(r => r.Key).ToHashSet())
+            .Select(r => r.Quantity));
 
     /// <summary>Entry price, else a floored suggestion from our listing or the market, else 0.</summary>
-    public long Price(LowStockEntry e)
+    public long Price(LowStockEntry e) => PriceForRestock(e).UnitPrice;
+
+    internal RestockPrice PriceForRestock(LowStockEntry e)
     {
-        if (e.Price > 0) return e.Price;
+        if (e.Price > 0) return new(e.Price, AutoRestockPriceKind.Manual);
         var ours = CurrentPrice(e);
-        return ours > 0 ? ApplyFloor(e, ours) : MarketSuggestion(e, ours);
+        if (ours > 0) return new(ApplyFloor(e, ours), AutoRestockPriceKind.Listing);
+        var offer = marketCache.CachedLowest(Plugin.Instance.MarketWatcher.HomeWorldId, e.ItemId, e.IsHq,
+            configuration.MatchQuality.For(e.ItemId, e.IsHq));
+        return RestockPricing.FromCache(offer, DateTime.UtcNow, configuration.AutoRestockMaxScanAgeHours,
+            configuration.UndercutGil, configuration.EffectiveFloorFor(e.ItemId, e.IsHq, costLedger).Price) ?? default;
     }
 
-    internal unsafe string[] CurrentRetainerNames()
+    internal unsafe RetainerSnapshot[] CurrentRetainers()
     {
-        if (Cid() == 0) return [];
+        var cid = Cid();
+        if (cid == 0) return [];
         var manager = RetainerManager.Instance();
-        var names = new List<string>();
-        if (manager != null && manager->IsReady)
-            for (uint i = 0; i < manager->GetRetainerCount(); ++i)
+        if (manager == null || !manager->IsReady) return MyRetainers().OrderBy(r => r.RetainerName).ToArray();
+
+        var retainers = new List<RetainerSnapshot>();
+        for (uint i = 0; i < manager->GetRetainerCount(); ++i)
+        {
+            var retainer = manager->GetRetainerBySortedIndex(i);
+            if (retainer == null || retainer->RetainerId == 0) continue;
+            var key = RetainerSnapshot.MakeKey(cid, retainer->RetainerId);
+            retainers.Add(configuration.Snapshots.GetValueOrDefault(key) ?? new RetainerSnapshot
             {
-                var retainer = manager->GetRetainerBySortedIndex(i);
-                if (retainer != null && retainer->RetainerId != 0) names.Add(retainer->NameString);
-            }
-        return (names.Count > 0 ? names : MyRetainers().Select(r => r.RetainerName)).OrderBy(n => n).ToArray();
+                Key = key,
+                CharacterContentId = cid,
+                RetainerName = retainer->NameString,
+            });
+        }
+        return retainers.ToArray();
+    }
+
+    internal (List<StockSourceReading> Inventory, List<StockSourceReading> Listings) StockReadings(
+        LowStockEntry entry, IReadOnlyList<RetainerSnapshot> retainers, DateTime now)
+    {
+        var freshness = new StockFreshness(now, loginUtc, Math.Max(1, configuration.StockMaxAgeHours));
+        var character = configuration.Characters.GetValueOrDefault(CharacterSnapshot.MakeKey(Cid()));
+        var inventory = new List<StockSourceReading>
+        {
+            new(Strings.StockBag, ReadInventory(character?.Bag ?? [], RetainerWatcher.CharacterBagTypes, character?.InventoryRefreshedUtc)),
+            new(Strings.StockSaddlebag, ReadInventory(character?.Saddlebag ?? [], RetainerWatcher.SaddlebagTypes, character?.InventoryRefreshedUtc)),
+            new(Strings.StockPremiumSaddlebag, ReadInventory(character?.PremiumSaddlebag ?? [], RetainerWatcher.PremiumSaddlebagTypes,
+                character?.InventoryRefreshedUtc)),
+        };
+        var listings = new List<StockSourceReading>();
+        var active = tracker.ActiveFor(entry.ItemId, entry.IsHq).ToLookup(l => l.RetainerKey);
+        foreach (var retainer in retainers)
+        {
+            inventory.Add(new(string.Format(Strings.StockRetainerInventory, retainer.RetainerName),
+                ReadInventory(retainer.Inventory, RetainerWatcher.RetainerInventoryTypes, retainer.InventoryRefreshedUtc)));
+            var records = active[retainer.Key];
+            listings.Add(new(string.Format(Strings.StockRetainerListed, retainer.RetainerName),
+                freshness.Count(records.Sum(l => l.Quantity), retainer.LastRefreshedUtc),
+                records.Any(l => l.MissingSinceUtc != null)));
+        }
+        return (inventory, listings);
+
+        StockReading ReadInventory(IEnumerable<InventoryEntry> entries, InventoryType[] types,
+            IReadOnlyDictionary<uint, DateTime>? timestamps)
+            => freshness.Inventory(entries, types.Select(t => (uint)t), timestamps, entry.ItemId, entry.IsHq);
+    }
+
+    internal string NextCyclePreview(LowStockEntry entry, IReadOnlyList<RetainerSnapshot> retainers, DateTime now)
+    {
+        if (entry.EffectiveRestockMode == StockRestockMode.Alert) return Strings.StockAlertOnly;
+        if (!configuration.AutoRestockDuringCycle) return Strings.StockCycleDisabled;
+        if (configuration.IsHeld(entry.ItemId, entry.IsHq)) return Strings.StockCycleHeld;
+        if (retainers.Count == 0 || retainers.Any(r => r.LastRefreshedUtc == DateTime.MinValue))
+            return Strings.StockCycleListingsUnavailable;
+
+        var character = configuration.Characters.GetValueOrDefault(CharacterSnapshot.MakeKey(Cid()));
+        var plan = AutoRestockPlanner.Plan(configuration.LowStock, retainers, character, tracker, configuration.IsHeld,
+                (id, hq) => configuration.EffectiveFloorFor(id, hq, costLedger).Price)
+            .Find(p => p.ItemId == entry.ItemId && p.IsHq == entry.IsHq);
+        if (plan == null) return $"{Strings.StockCycleEnoughListed}\n{Strings.StockCycleSnapshot}";
+        if (plan.Actions.Count == 0)
+        {
+            var reason = plan.SkipReason == RestockSkipReason.None ? Strings.AutoRestockPriceLabel(plan.PriceKind)
+                : Strings.RestockSkipLabel(plan.SkipReason);
+            return $"{string.Format(Strings.StockCycleSkip, reason)}\n{Strings.StockCycleSnapshot}";
+        }
+
+        var lines = new List<string>();
+        foreach (var actions in plan.Actions.GroupBy(a => a.RetainerKey))
+        {
+            var name = retainers.First(r => r.Key == actions.Key).RetainerName;
+            var units = actions.Sum(a => a.Quantity);
+            lines.Add(plan.PriceKind == AutoRestockPriceKind.Pending
+                ? string.Format(Strings.StockCycleCompare, name, units)
+                : string.Format(Strings.StockCycleListing, name, units, actions.First().UnitPrice,
+                    Strings.AutoRestockPriceLabel(plan.PriceKind)));
+        }
+        if (plan.PriceKind == AutoRestockPriceKind.Pending)
+        {
+            var world = Plugin.Instance.MarketWatcher.HomeWorldId;
+            var cached = marketCache.CachedLowest(world, entry.ItemId, entry.IsHq, configuration.MatchQuality.For(entry.ItemId, entry.IsHq));
+            var floor = configuration.EffectiveFloorFor(entry.ItemId, entry.IsHq, costLedger).Price;
+            var fallback = RestockPricing.Resolve(null, cached, now, configuration.AutoRestockMaxScanAgeHours,
+                configuration.UndercutGil, floor, () => RestockPricing.LastSale(tracker, entry.ItemId, entry.IsHq, Cid(),
+                    world, configuration.Snapshots));
+            if (fallback.UnitPrice > 0)
+                lines.Add(string.Format(Strings.StockCycleFallback, fallback.UnitPrice,
+                    Strings.AutoRestockPriceLabel(fallback.Kind, fallback.CacheAge)));
+        }
+        lines.Add(Strings.StockCycleSnapshot);
+        return string.Join("\n", lines);
     }
 
     public List<PlannedAction> PlanRestock(LowStockEntry e, int targetUnits, long unitPrice, bool allowTopUps = true)
@@ -141,7 +230,7 @@ public sealed class LowStockService : IDisposable
                     && l.IsHQ == record.IsHq && l.Quantity == record.Quantity))
                 .Select(l => (r.Key, l)));
             actions = StackTopUpPlanner.Plan(e.ItemId, e.IsHq, RetainerWatcher.ResolveMaxListingStack(row),
-                (int)row.StackSize, listings, sources);
+                (int)row.StackSize, listings, sources, e.PerListing);
             listed += actions.Sum(a => a.TopUp!.AddedUnits);
         }
 
@@ -160,24 +249,25 @@ public sealed class LowStockService : IDisposable
 
     /// <summary>
     /// Market lowest (bait filtered) - undercut from the last fetch, with when it was fetched.
-    /// Null when the item was never fetched in this session.
+    /// Null when neither a live scan nor a saved price is available for the home world.
     /// </summary>
     public (long Price, DateTime FetchedUtc)? Suggestion(LowStockEntry e)
     {
-        var at = marketCache.UpdatedUtc(e.ItemId);
-        if (at == null) return null;
-        var price = MarketSuggestion(e, CurrentPrice(e));
-        return (price, at.Value);
+        var world = Plugin.Instance.MarketWatcher.HomeWorldId;
+        var matchQuality = configuration.MatchQuality.For(e.ItemId, e.IsHq);
+        var offer = marketCache.CachedLowest(world, e.ItemId, e.IsHq, matchQuality, CurrentPrice(e));
+        return offer is { } found ? (PriceFromLowest(e, found.Lowest), found.UpdatedUtc) : null;
     }
 
-    private long CurrentPrice(LowStockEntry e) =>
-        tracker.ActiveFor(e.ItemId, e.IsHq).Select(r => r.LastPrice).Where(p => p > 0).DefaultIfEmpty(0).Min();
-
-    private long MarketSuggestion(LowStockEntry e, long currentPrice)
+    private long CurrentPrice(LowStockEntry e)
     {
-        var lowest = marketCache.GetLowest(e.ItemId, e.IsHq, configuration.MatchQuality.For(e.ItemId, e.IsHq), currentPrice);
-        return lowest > 0 ? ApplyFloor(e, Math.Max(1, lowest - configuration.UndercutGil)) : 0;
+        var keys = MyRetainers().Select(s => s.Key).ToHashSet();
+        return tracker.ActiveFor(e.ItemId, e.IsHq).Where(r => keys.Contains(r.RetainerKey))
+            .Select(r => r.LastPrice).Where(p => p > 0).DefaultIfEmpty(0).Min();
     }
+
+    private long PriceFromLowest(LowStockEntry e, long lowest)
+        => lowest > 0 ? ApplyFloor(e, Math.Max(1, lowest - Math.Max(0, configuration.UndercutGil))) : 0;
 
     private long ApplyFloor(LowStockEntry e, long price) =>
         Math.Max(price, configuration.EffectiveFloorFor(e.ItemId, e.IsHq, costLedger).Price);
@@ -194,11 +284,12 @@ public sealed class LowStockService : IDisposable
         var now = DateTime.UtcNow;
         if (now < nextCheckUtc) return;
         nextCheckUtc = now + TimeSpan.FromSeconds(5);
-        if (Cid() == 0 || configuration.LowStock.Count == 0) return;
+        var cid = Cid();
+        if (cid == 0 || configuration.LowStock.Count == 0) return;
 
         foreach (var e in configuration.LowStock)
         {
-            var key = (e.ItemId, e.IsHq);
+            var key = (cid, e.ItemId, e.IsHq);
             var listed = ListedUnits(e.ItemId, e.IsHq);
             var flag = notified.TryGetValue(key, out var f) && f;
             var fire = RestockPlanner.ShouldNotify(listed, e.Threshold, ref flag);

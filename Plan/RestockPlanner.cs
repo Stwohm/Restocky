@@ -23,6 +23,14 @@ public sealed class LowStockEntry
     public Dictionary<ulong, string> PreferredRetainers { get; set; } = new();
     public StockKind Kind { get; set; }
     public StockStatus Status { get; set; }
+    public StockRestockMode RestockMode { get; set; }
+
+    internal StockRestockMode EffectiveRestockMode => RestockMode switch
+    {
+        StockRestockMode.Auto => StockRestockMode.Auto,
+        StockRestockMode.Alert => StockRestockMode.Alert,
+        _ => Status == StockStatus.Trial ? StockRestockMode.Alert : StockRestockMode.Auto,
+    };
 
     internal bool MatchesTags(StockKind kind, StockStatus status)
         => (kind == StockKind.None || Kind == kind) && (status == StockStatus.None || Status == status);
@@ -42,6 +50,7 @@ public sealed class LowStockEntry
 
 public enum StockKind { None, Flip, Gather, Craft }
 public enum StockStatus { None, Regular, Trial }
+public enum StockRestockMode { Default, Auto, Alert }
 
 /// <summary>
 /// Fork: tops up the units listed for one item to a target, pulling from retainer inventories
@@ -70,6 +79,9 @@ public static class RestockPlanner
         perListing = Math.Max(1, perListing);
         var free = freeSlotsByRetainer.ToDictionary(p => p.Key, p => p.Value);
         var preferredKey = sellOn == null ? null : retainers?.FirstOrDefault(r => r.RetainerName == sellOn)?.Key;
+        var firstChoice = sellOn == null ? preferred.FirstOrDefault() : preferredKey;
+        var preferredSnapshot = retainers?.FirstOrDefault(r => r.Key == firstChoice);
+        var fullSnapshot = preferredSnapshot?.Listings.Count >= Planner.MaxListingSlots ? preferredSnapshot : null;
         var remaining = sources.Select(s => s.Available).ToArray();
 
         // Preferred retainers (the ones that already sell this item) list first:
@@ -104,7 +116,8 @@ public static class RestockPlanner
                     IsHQ = isHq,
                     Quantity = qty,
                     UnitPrice = unitPrice,
-                    PreferredRetainerFallback = target == preferredKey ? null : sellOn,
+                    PreferredRetainerFallback = target == firstChoice ? null : sellOn ?? fullSnapshot?.RetainerName,
+                    PreferredRetainerFullAtUtc = target != fullSnapshot?.Key ? fullSnapshot?.LastRefreshedUtc : null,
                     StockRestock = true,
                 });
                 free[target]--;

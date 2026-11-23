@@ -65,11 +65,11 @@ public sealed class SaleAnalyticsTests
             Assert.Equal(1, calls);
             Assert.Equal(32.5m, record.ConsumedCost);
             Assert.Equal(1, record.UnknownCostUnits);
-            Assert.Equal(157.5m, record.RealizedProfit);
+            Assert.Equal(62.5m, record.RealizedProfit);
             Assert.Equal(Now, record.RecordedSaleUtc);
             Assert.Equal(4, ledger.RemainingUnits(100, true));
             Assert.Equal(2, ledger.RemainingUnits(100, false));
-            Assert.EndsWith(",32.5,157.5", tracker.ListingsCsv().TrimEnd());
+            Assert.EndsWith(",32.5,62.5,95", tracker.ListingsCsv().TrimEnd());
         }
         finally { directory.Delete(true); }
     }

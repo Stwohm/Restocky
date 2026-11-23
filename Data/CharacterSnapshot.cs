@@ -23,6 +23,7 @@ public sealed class CharacterSnapshot
     public List<InventoryEntry> PremiumSaddlebag { get; set; } = new();
 
     public DateTime LastRefreshedUtc { get; set; } = DateTime.MinValue;
+    public Dictionary<uint, DateTime>? InventoryRefreshedUtc { get; set; }
 
     public static string MakeKey(ulong characterContentId) => $"char.{characterContentId:X}";
 }

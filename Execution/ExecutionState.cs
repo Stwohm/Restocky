@@ -85,18 +85,11 @@ public enum ExecutionState
     /// <summary>RetainerList に戻ったのを待つ → 次のジョブへ。</summary>
     AwaitingDismissed,
 
-    /// <summary>Fork handover: right-click the item in the bag / retainer inventory.</summary>
-    HandoverOpenContext,
-
-    /// <summary>Fork handover: pick "Put up for sale" in the context menu.</summary>
+    /// <summary>Pick "Put up for sale" in the inventory context menu.</summary>
     HandoverAwaitContext,
 
-    /// <summary>Fork handover: sale window opened; set quantity, leave the price to the user.</summary>
+    /// <summary>Wait for the inventory item's sale dialog before comparing prices.</summary>
     HandoverAwaitDialog,
-
-    /// <summary>Fork handover: the price dialog belongs to the user until it closes.</summary>
-    HandoverWaitUser,
-
 
     Done,
     Stopped,

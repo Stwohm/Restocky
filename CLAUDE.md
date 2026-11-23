@@ -36,10 +36,12 @@ Fork changes and where they live:
   Stock tracking thresholds and targets count units across the current character's retainers. The pass
   uses refreshed listings to plan quantities and free slots once, skips held item+quality pairs,
   and uses the existing listing executor and saddlebag pacing. Pricing uses the lowest current
-  same-quality listing we own, then a same-quality market scan younger than the configured limit
-  (6 hours by default), then the last recorded same-quality sale. The effective floor applies to
-  all prices. Manual Apply keeps its confirm dialog, and the Stock tracking price handover uses the
-  game's confirmation.
+  same-quality listing we own. With no listing it opens the inventory item's sale dialog to compare
+  live market prices, then closes it and lists through the existing direct API and slot readback.
+  A failed comparison falls back to a cache younger than the configured limit (6 hours by default),
+  then the last recorded same-quality sale. An empty competitor pool goes straight to the last sale.
+  The effective floor applies to all prices. Manual List & price uses a fresh cache when available
+  and requires confirmation in Restocky before execution, like manual Restock and Apply.
 - **Stack top-ups** (`Plan/StackTopUpPlanner.cs`, tested, and `Execution/Executor.TopUp.cs`):
   manual Restock only, enabled by default, with the existing confirm dialog. Plan the largest
   eligible partial stack first, at its current unit price and on its existing retainer. Top-ups can

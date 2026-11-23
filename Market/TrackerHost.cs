@@ -31,6 +31,7 @@ public sealed class TrackerHost : IDisposable
         this.dir = dir;
         this.configuration = configuration;
         Tracker = ListingTracker.Load(System.IO.Path.Combine(dir, "listings.json"), consumeCost, message => log.Information(message));
+        Tracker.ListingSold += OnListingSold;
         framework.Update += OnUpdate;
         ChatHook.Subscribe(chat, data, OnGameSaleMessage, OnAllaganSaleMessage);
     }
@@ -39,7 +40,19 @@ public sealed class TrackerHost : IDisposable
     {
         framework.Update -= OnUpdate;
         ChatHook.Unsubscribe(chat);
+        Tracker.ListingSold -= OnListingSold;
         if (Tracker.Dirty) Tracker.Save(dir);
+    }
+
+    private void OnListingSold(ListingRecord listing, DateTime soldUtc)
+    {
+        if (configuration.Snapshots.TryGetValue(listing.RetainerKey, out var snapshot)
+            && snapshot.TryRemoveSoldListing(listing.Slot, listing.ItemId, listing.IsHq,
+                listing.Quantity, listing.LastPrice, soldUtc))
+        {
+            Plugin.Instance?.ListingScans.Forget(listing.RetainerKey, listing.Slot, listing.ItemId, listing.IsHq);
+            configuration.Save();
+        }
     }
 
     private void OnUpdate(IFramework _)
@@ -75,7 +88,7 @@ public sealed class TrackerHost : IDisposable
     private void OnGameSaleMessage(uint itemId, bool isHq, string text)
     {
         var gil = SaleMessage.ParseGil(text);
-        var rec = Tracker.OnSale(itemId, isHq, gil, DateTime.UtcNow);
+        var rec = Tracker.OnSale(itemId, isHq, gil, DateTime.UtcNow, Plugin.PlayerState.ContentId);
         if (rec == null)
             log.Information($"[Restocker] sale message source=game item={itemId} hq={isHq} gil={gil}: no tracked listing");
         else
@@ -85,7 +98,7 @@ public sealed class TrackerHost : IDisposable
     private void OnAllaganSaleMessage(IReadOnlyList<uint> itemIds, int qty, string itemName, long grossGil)
     {
         var netGil = ListingTracker.NetFromGross(grossGil);
-        var rec = Tracker.OnAllaganSale(itemIds, qty, netGil, DateTime.UtcNow);
+        var rec = Tracker.OnAllaganSale(itemIds, qty, netGil, DateTime.UtcNow, Plugin.PlayerState.ContentId);
         if (rec == null)
             log.Information($"[Restocker] sale message source=allaganmarket item='{itemName}' ids={string.Join("/", itemIds)} qty={qty} gross={grossGil} net={netGil}: no tracked listing");
         else

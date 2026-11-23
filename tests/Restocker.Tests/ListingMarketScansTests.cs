@@ -6,6 +6,34 @@ namespace Restocker.Tests;
 public class ListingMarketScansTests
 {
     [Fact]
+    public void A_fresh_plan_replaces_the_reason_and_a_newer_scan_invalidates_it()
+    {
+        var scans = new ListingMarketScans();
+        var now = DateTime.UnixEpoch.AddHours(1);
+        MarketOffer[] bait = [new(12, "Rival", 4)];
+        var floor = new RepriceDecision(90, false, RepriceReason.MaxDrop, 85) { ClampedFloor = 90 };
+        var timedOut = new RepriceDecision(120, false, RepriceReason.NoData, 0);
+        scans.Record("A", 2, 42, true, new(now, 120, bait));
+        scans.RecordDecision("A", 2, 42, true, now, floor, true, bait);
+
+        var result = Assert.IsType<ListingPriceDecision>(scans.GetDecision("A", 2, 42, true));
+        Assert.Equal(90, result.Decision.ClampedFloor);
+        Assert.Equal("Rival", Assert.Single(result.Bait).Seller);
+        Assert.True(result.MatchQuality);
+        Assert.Null(scans.GetDecision("B", 2, 42, true));
+        Assert.Null(scans.GetDecision("A", 1, 42, true));
+        Assert.Null(scans.GetDecision("A", 2, 41, true));
+        Assert.Null(scans.GetDecision("A", 2, 42, false));
+
+        scans.RecordDecision("A", 2, 42, true, now.AddMinutes(1), timedOut, false, []);
+        Assert.Equal(timedOut, scans.GetDecision("A", 2, 42, true)?.Decision);
+        Assert.Equal(now, scans.Get("A", 2, 42, true)?.ScannedUtc);
+        scans.Record("A", 2, 42, true, new(now.AddMinutes(2), 120, []));
+        scans.RecordDecision("A", 2, 42, true, now, floor, true, bait);
+        Assert.Null(scans.GetDecision("A", 2, 42, true));
+    }
+
+    [Fact]
     public void Reprice_keeps_the_previous_scan_until_a_new_scan_replaces_it()
     {
         var scans = new ListingMarketScans();

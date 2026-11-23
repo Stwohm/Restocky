@@ -219,7 +219,8 @@ public sealed class ListTab
         var filtered = ApplyFilter(rows);
         if (filtered.Count == 0 && filter.Length > 0) return;
 
-        var header = string.Format(Strings.RetainerHeaderInventory, snap.RetainerName, filtered.Count, FreshnessSuffix(snap.LastRefreshedUtc));
+        var header = string.Format(Strings.RetainerHeaderInventory, snap.RetainerName, filtered.Count,
+            FreshnessSuffix(RetainerWatcher.RetainerInventoryFreshness(snap)));
         if (!DrawCollapsingHeader("list-" + snap.Key, header)) return;
 
         DrawRowsTable(snap.Key, filtered, isRetainerSource: true);
@@ -233,7 +234,8 @@ public sealed class ListTab
         var bagFiltered = ApplyFilter(bagRows);
         if (bagFiltered.Count > 0 || filter.Length == 0)
         {
-            var header = string.Format(Strings.RetainerHeaderInventory, $"{Strings.CharacterInventoryHeader} ({ch.CharacterName})", bagFiltered.Count, FreshnessSuffix(ch.LastRefreshedUtc));
+            var header = string.Format(Strings.RetainerHeaderInventory, $"{Strings.CharacterInventoryHeader} ({ch.CharacterName})", bagFiltered.Count,
+                FreshnessSuffix(RetainerWatcher.CharacterInventoryFreshness(ch, saddle: false)));
             if (DrawCollapsingHeader("char-" + sourceKey, header))
             {
                 DrawRowsTable(sourceKey + ".bag", bagFiltered, isRetainerSource: false);
@@ -244,7 +246,8 @@ public sealed class ListTab
         var saddleFiltered = ApplyFilter(saddleRows);
         if (saddleFiltered.Count > 0 || filter.Length == 0)
         {
-            var header = string.Format(Strings.RetainerHeaderInventory, $"{Strings.SaddlebagHeader} ({ch.CharacterName})", saddleFiltered.Count, FreshnessSuffix(ch.LastRefreshedUtc));
+            var header = string.Format(Strings.RetainerHeaderInventory, $"{Strings.SaddlebagHeader} ({ch.CharacterName})", saddleFiltered.Count,
+                FreshnessSuffix(RetainerWatcher.CharacterInventoryFreshness(ch, saddle: true)));
             if (DrawCollapsingHeader("saddle-" + sourceKey, header))
             {
                 DrawRowsTable(sourceKey + ".saddle", saddleFiltered, isRetainerSource: false);

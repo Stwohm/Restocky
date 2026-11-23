@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Dalamud.Game.Addon.Lifecycle;
 using Dalamud.Game.Addon.Lifecycle.AddonArgTypes;
 using Dalamud.Game.Inventory;
@@ -41,11 +42,25 @@ public sealed unsafe class RetainerWatcher : IDisposable
         this.log = log;
 
         addonLifecycle.RegisterListener(AddonEvent.PostRequestedUpdate, "RetainerSellList", OnSellListUpdate);
+        addonLifecycle.RegisterListener(AddonEvent.PostSetup, ["InventoryBuddy", "InventoryBuddy2"], OnSaddlebagOpen);
     }
 
     public void Dispose()
     {
         addonLifecycle.UnregisterListener(AddonEvent.PostRequestedUpdate, "RetainerSellList", OnSellListUpdate);
+        addonLifecycle.UnregisterListener(OnSaddlebagOpen);
+    }
+
+    private void OnSaddlebagOpen(AddonEvent type, AddonArgs args)
+    {
+        try
+        {
+            CaptureCharacterSnapshot();
+        }
+        catch (Exception ex)
+        {
+            log.Error(ex, "[Restocker] failed to capture saddlebag snapshot");
+        }
     }
 
     /// <summary>
@@ -88,7 +103,10 @@ public sealed unsafe class RetainerWatcher : IDisposable
         snapshot.Key = RetainerSnapshot.MakeKey(snapshot.CharacterContentId, snapshot.RetainerId);
         snapshot.Listings = ReadListings(out var marketLoaded);
         if (!marketLoaded) return null;
-        snapshot.Inventory = ReadInventory();
+        configuration.Snapshots.TryGetValue(snapshot.Key, out var previous);
+        snapshot.InventoryRefreshedUtc = new(previous?.InventoryRefreshedUtc ?? []);
+        snapshot.Inventory = InventorySnapshot.Refresh(previous?.Inventory ?? [], snapshot.InventoryRefreshedUtc,
+            ReadContainers(RetainerInventoryTypes), snapshot.LastRefreshedUtc);
         LastSeen = snapshot;
 
         configuration.Snapshots[snapshot.Key] = snapshot;
@@ -153,25 +171,25 @@ public sealed unsafe class RetainerWatcher : IDisposable
         return System.Math.Min(inventoryStack, 99);
     }
 
-    private static readonly InventoryType[] RetainerInventoryTypes =
+    internal static readonly InventoryType[] RetainerInventoryTypes =
     [
         InventoryType.RetainerPage1, InventoryType.RetainerPage2, InventoryType.RetainerPage3,
         InventoryType.RetainerPage4, InventoryType.RetainerPage5, InventoryType.RetainerPage6,
         InventoryType.RetainerPage7,
     ];
 
-    private static readonly InventoryType[] CharacterBagTypes =
+    internal static readonly InventoryType[] CharacterBagTypes =
     [
         InventoryType.Inventory1, InventoryType.Inventory2,
         InventoryType.Inventory3, InventoryType.Inventory4,
     ];
 
-    private static readonly InventoryType[] SaddlebagTypes =
+    internal static readonly InventoryType[] SaddlebagTypes =
     [
         InventoryType.SaddleBag1, InventoryType.SaddleBag2,
     ];
 
-    private static readonly InventoryType[] PremiumSaddlebagTypes =
+    internal static readonly InventoryType[] PremiumSaddlebagTypes =
     [
         InventoryType.PremiumSaddleBag1, InventoryType.PremiumSaddleBag2,
     ];
@@ -188,24 +206,46 @@ public sealed unsafe class RetainerWatcher : IDisposable
         var localPlayer = objectTable.LocalPlayer;
         var name = localPlayer?.Name.TextValue ?? string.Empty;
 
+        var key = CharacterSnapshot.MakeKey(characterId);
+        configuration.Characters.TryGetValue(key, out var previous);
+        var now = DateTime.UtcNow;
+        var lastRefresh = previous?.LastRefreshedUtc ?? DateTime.MinValue;
+        var timestamps = new Dictionary<uint, DateTime>(previous?.InventoryRefreshedUtc ?? []);
+        var bag = ReadContainers(CharacterBagTypes);
+        var saddle = ReadContainers(SaddlebagTypes);
+        var premium = ReadContainers(PremiumSaddlebagTypes);
         var snapshot = new CharacterSnapshot
         {
             CharacterContentId = characterId,
             CharacterName = name,
-            Bag = ReadContainers(CharacterBagTypes),
-            Saddlebag = ReadContainers(SaddlebagTypes),
-            PremiumSaddlebag = ReadContainers(PremiumSaddlebagTypes),
-            LastRefreshedUtc = DateTime.UtcNow,
+            Bag = InventorySnapshot.Refresh(previous?.Bag ?? [], timestamps, bag, now),
+            Saddlebag = InventorySnapshot.Refresh(previous?.Saddlebag ?? [], timestamps, saddle, now),
+            PremiumSaddlebag = InventorySnapshot.Refresh(previous?.PremiumSaddlebag ?? [], timestamps, premium, now),
+            InventoryRefreshedUtc = timestamps,
+            LastRefreshedUtc = bag.Count + saddle.Count + premium.Count > 0 ? now : lastRefresh,
         };
-        configuration.Characters[CharacterSnapshot.MakeKey(characterId)] = snapshot;
+        configuration.Characters[key] = snapshot;
         configuration.Save();
 
         log.Debug($"[Restocker] character snapshot updated: bag={snapshot.Bag.Count} saddle={snapshot.Saddlebag.Count} premium={snapshot.PremiumSaddlebag.Count}");
     }
 
-    private List<InventoryEntry> ReadContainers(InventoryType[] types)
+    internal static DateTime RetainerInventoryFreshness(RetainerSnapshot snapshot)
+        => InventorySnapshot.OldestRefresh(RetainerInventoryTypes.Select(type => (uint)type),
+            snapshot.InventoryRefreshedUtc, snapshot.LastRefreshedUtc);
+
+    internal static DateTime CharacterInventoryFreshness(CharacterSnapshot snapshot, bool saddle)
     {
-        var result = new List<InventoryEntry>();
+        var types = saddle ? SaddlebagTypes : CharacterBagTypes;
+        var containers = types.Select(type => (uint)type);
+        if (saddle && PremiumSaddlebagTypes.Any(type => snapshot.InventoryRefreshedUtc?.ContainsKey((uint)type) == true))
+            containers = containers.Concat(PremiumSaddlebagTypes.Select(type => (uint)type));
+        return InventorySnapshot.OldestRefresh(containers, snapshot.InventoryRefreshedUtc, snapshot.LastRefreshedUtc);
+    }
+
+    private Dictionary<uint, List<InventoryEntry>> ReadContainers(InventoryType[] types)
+    {
+        var result = new Dictionary<uint, List<InventoryEntry>>();
         var im = InventoryManager.Instance();
         if (im == null) return result;
         var itemSheet = dataManager.GetExcelSheet<Item>();
@@ -214,6 +254,7 @@ public sealed unsafe class RetainerWatcher : IDisposable
         {
             var container = im->GetInventoryContainer(t);
             if (container == null || !container->IsLoaded) continue;
+            var entries = result[(uint)t] = new List<InventoryEntry>();
             for (var i = 0; i < container->Size; i++)
             {
                 var item = container->GetInventorySlot(i);
@@ -231,50 +272,9 @@ public sealed unsafe class RetainerWatcher : IDisposable
                     entry.MaxStackPerListing = ResolveMaxListingStack(row);
                     entry.IsListable = row.ItemSearchCategory.RowId != 0;
                 }
-                result.Add(entry);
+                entries.Add(entry);
             }
         }
-        return result;
-    }
-
-    private List<InventoryEntry> ReadInventory()
-    {
-        var result = new List<InventoryEntry>();
-        var im = InventoryManager.Instance();
-        if (im == null) return result;
-
-        var itemSheet = dataManager.GetExcelSheet<Item>();
-
-        foreach (var t in RetainerInventoryTypes)
-        {
-            var container = im->GetInventoryContainer(t);
-            if (container == null || !container->IsLoaded) continue;
-
-            for (var i = 0; i < container->Size; i++)
-            {
-                var item = container->GetInventorySlot(i);
-                if (item == null || item->ItemId == 0) continue;
-
-                var entry = new InventoryEntry
-                {
-                    ItemId = item->ItemId,
-                    IsHQ = (item->Flags & InventoryItem.ItemFlags.HighQuality) != 0,
-                    Quantity = (int)item->Quantity,
-                    ContainerId = (uint)t,
-                    SlotIndex = item->Slot,
-                };
-
-                if (itemSheet.TryGetRow(item->ItemId, out var row))
-                {
-                    entry.MaxStackPerListing = ResolveMaxListingStack(row);
-                    // 出品可能フラグは ItemSearchCategory != 0 で近似（厳密には bind 状態など個別判定が要る）
-                    entry.IsListable = row.ItemSearchCategory.RowId != 0;
-                }
-
-                result.Add(entry);
-            }
-        }
-
         return result;
     }
 }

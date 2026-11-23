@@ -39,7 +39,7 @@ public static class AutoRepricePlanner
         RepriceSettings settings,
         DateTime nowUtc,
         Func<uint, bool, bool>? isHeld = null,
-        Action<LiveListing, RepriceDecision, IReadOnlyList<MarketOffer>>? onDecision = null,
+        Action<LiveListing, RepriceDecision, IReadOnlyList<MarketOffer>, IReadOnlyList<MarketOffer>>? onDecision = null,
         Func<uint, bool, bool>? includeBaitForPlan = null,
         Func<uint, bool>? marketTimedOut = null)
     {
@@ -49,6 +49,7 @@ public static class AutoRepricePlanner
             var includeBait = includeBaitForPlan?.Invoke(l.ItemId, l.IsHQ) == true;
             if (isHeld?.Invoke(l.ItemId, l.IsHQ) == true)
             {
+                onDecision?.Invoke(l, new RepriceDecision(l.UnitPrice, false, RepriceReason.Held, 0), [], []);
                 result.HeldCount++;
                 result.NotApplied.Add(new PriceHistoryRow
                 {
@@ -68,6 +69,7 @@ public static class AutoRepricePlanner
             var offers = competitors(l.ItemId, l.IsHQ);
             RepriceDecision d;
             var undercutters = string.Empty;
+            IReadOnlyList<MarketOffer> dropped = [];
             if (offers == null)
             {
                 var reason = marketTimedOut?.Invoke(l.ItemId) == true ? RepriceReason.NoData : RepriceReason.Error;
@@ -80,7 +82,7 @@ public static class AutoRepricePlanner
                 prices.Sort();
                 d = RepriceRules.Decide(l.UnitPrice, prices, floorFor(l.ItemId, l.IsHQ), settings, includeBait);
                 undercutters = MarketOfferFormat.Undercutters(offers, l.UnitPrice);
-                var dropped = BaitFinder.Dropped(offers, d.LowestCompetitor);
+                dropped = BaitFinder.Dropped(offers, d.LowestCompetitor);
                 if (dropped.Count > 0)
                 {
                     result.BaitPrices[(l.Slot, l.ItemId, l.IsHQ)] = dropped[0].Price;
@@ -89,7 +91,7 @@ public static class AutoRepricePlanner
                 }
             }
 
-            onDecision?.Invoke(l, d, offers ?? Array.Empty<MarketOffer>());
+            onDecision?.Invoke(l, d, offers ?? Array.Empty<MarketOffer>(), dropped);
 
             if (d.Apply)
             {
@@ -107,6 +109,7 @@ public static class AutoRepricePlanner
                     Reason = d.Reason,
                     BypassedMaxDrop = d.BypassedMaxDrop,
                     MatchedBait = d.MatchedBait,
+                    ClampedFloor = d.ClampedFloor,
                     Undercutters = undercutters,
                 });
             }
@@ -125,6 +128,7 @@ public static class AutoRepricePlanner
                     NewPrice = d.NewPrice,
                     Applied = false,
                     Reason = d.Reason,
+                    ClampedFloor = d.ClampedFloor,
                     Undercutters = undercutters,
                 });
             }

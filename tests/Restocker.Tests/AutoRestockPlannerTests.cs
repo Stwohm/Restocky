@@ -11,28 +11,15 @@ public class AutoRestockPlannerTests
     private const uint Twine = 50970;
     private const uint Other = 50971;
 
-    [Theory]
-    [InlineData(0, 0, false)]
-    [InlineData(-1, 0, false)]
-    [InlineData(99, 100, false)]
-    [InlineData(100, 100, true)]
-    [InlineData(4294967295L, 0, true)]
-    [InlineData(4294967296L, 0, false)]
-    public void Validates_the_final_price_against_the_current_floor_and_api_range(long price, long floor, bool valid)
-        => Assert.Equal(valid, AutoRestockPlanner.IsValidPrice(price, floor));
-    private static readonly DateTime Now = new(2026, 11, 23, 12, 0, 0, DateTimeKind.Utc);
-
     [Fact]
     public void Tops_up_by_units_at_the_lowest_live_price_after_repricings()
     {
         var a = Retainer("A", Listed(Twine, 1, 1_234), Listed(Twine, 1, 1_600));
         var b = Retainer("B", Listed(Twine, 7, 800, hq: true));
         a.Inventory.Add(Stock(Twine, 2));
-        var tracker = Tracker(Sale(Twine, "A", gross: 2_000));
-        var market = Cache(Now, nq: 900);
         var entry = new LowStockEntry { ItemId = Twine, Threshold = 2, Target = 3, Price = 3_000 };
 
-        var result = Assert.Single(Plan([entry], [a, b], tracker: tracker, market: market));
+        var result = Assert.Single(Plan([entry], [a, b]));
 
         Assert.Equal(AutoRestockPriceKind.Listing, result.PriceKind);
         var action = Assert.Single(result.Actions);
@@ -55,127 +42,96 @@ public class AutoRestockPlannerTests
             new LowStockEntry { ItemId = Other, Threshold = 1, Target = 1 },
         };
 
-        Assert.Empty(Plan(entries, [a], market: Cache(Now, hq: 200), held: (id, hq) => id == Twine && hq));
-        Assert.True(Assert.Single(Plan(entries, [a], market: Cache(Now, hq: 200))).IsHq);
+        Assert.Empty(Plan(entries, [a], held: (id, hq) => id == Twine && hq));
+        Assert.True(Assert.Single(Plan(entries, [a])).IsHq);
     }
 
     [Theory]
-    [InlineData(1_200, 15, 0, 1_185)]
-    [InlineData(1_200, 15, 1_195, 1_195)]
-    [InlineData(1, 15, 0, 1)]
-    public void Fresh_market_uses_same_quality_undercut_and_floor(int competitor, int undercut, int floor, int price)
+    [InlineData(StockRestockMode.Default, StockStatus.None, StockRestockMode.Auto)]
+    [InlineData(StockRestockMode.Default, StockStatus.Regular, StockRestockMode.Auto)]
+    [InlineData(StockRestockMode.Default, StockStatus.Trial, StockRestockMode.Alert)]
+    [InlineData(StockRestockMode.Auto, StockStatus.Trial, StockRestockMode.Auto)]
+    [InlineData(StockRestockMode.Alert, StockStatus.Regular, StockRestockMode.Alert)]
+    public void Resolves_explicit_modes_and_tag_defaults(StockRestockMode mode, StockStatus status, StockRestockMode expected)
     {
-        var a = Retainer("A");
-        a.Inventory.Add(Stock(Twine, 1, hq: true));
-        var tracker = Tracker(Sale(Twine, "A", gross: 1_234, hq: true));
-        var market = Cache(Now.AddHours(-5.99), nq: 75, hq: competitor);
-
-        var result = Assert.Single(Plan([Watch(Twine, hq: true)], [a], tracker: tracker, market: market,
-            undercut: undercut, floor: floor));
-
-        Assert.Equal(AutoRestockPriceKind.Market, result.PriceKind);
-        Assert.Equal(price, Assert.Single(result.Actions).UnitPrice);
-    }
-
-    [Theory]
-    [InlineData(6, 6, 5_000)]
-    [InlineData(7, 6, 5_000)]
-    [InlineData(1, 1, 5_000)]
-    [InlineData(0, 0, 5_000)]
-    [InlineData(-1, 6, 5_000)]
-    [InlineData(1, 6, 0)]
-    public void Falls_back_to_last_same_quality_sale_when_the_scan_cannot_supply_a_price(int age, int limit, int hqPrice)
-    {
-        var a = Retainer("A");
-        a.Inventory.Add(Stock(Twine, 1, hq: true));
-        var tracker = Tracker(
-            Sale(Twine, "A", gross: 1_000, hq: true, when: Now.AddDays(-2)),
-            Sale(Twine, "1.F", gross: 2_468, hq: true, quantity: 2, when: Now.AddDays(-1)),
-            Sale(Twine, "A", gross: 900),
-            Sale(Other, "A", gross: 50, hq: true));
-
-        var result = Assert.Single(Plan([Watch(Twine, hq: true)], [a], tracker: tracker,
-            market: Cache(Now.AddHours(-age), nq: 300, hq: hqPrice), scanAge: limit));
-
-        Assert.Equal(AutoRestockPriceKind.LastSale, result.PriceKind);
-        Assert.Equal(1_234, Assert.Single(result.Actions).UnitPrice);
-    }
-
-    [Theory]
-    [InlineData(1_234, 0, 1_234)]
-    [InlineData(0, 2_344, 1_234)]
-    [InlineData(1_000, 2_344, 1_234)]
-    public void Handles_sale_history_with_only_net_proceeds_and_older_records_with_only_asking_price(
-        int lastPrice, int netGil, int expected)
-    {
-        var a = Retainer("A");
-        a.Inventory.Add(Stock(Twine, 1));
-        var sale = Sale(Twine, "A", gross: null, quantity: 2);
-        sale.LastPrice = lastPrice;
-        sale.SoldTotalGil = netGil;
-
-        var result = Assert.Single(Plan([Watch(Twine)], [a], tracker: Tracker(sale)));
-
-        Assert.Equal(AutoRestockPriceKind.LastSale, result.PriceKind);
-        Assert.Equal(expected, Assert.Single(result.Actions).UnitPrice);
-    }
-
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void Applies_the_floor_to_listing_and_sale_sources(bool listed)
-    {
-        var a = listed ? Retainer("A", Listed(Twine, 1, 100)) : Retainer("A");
-        a.Inventory.Add(Stock(Twine, 1));
-        var result = Assert.Single(Plan([new LowStockEntry { ItemId = Twine, Target = 2 }], [a],
-            tracker: Tracker(Sale(Twine, "A", gross: 99)), floor: 105));
-
-        Assert.Equal(listed ? AutoRestockPriceKind.Listing : AutoRestockPriceKind.LastSale, result.PriceKind);
-        Assert.Equal(105, Assert.Single(result.Actions).UnitPrice);
+        var entry = new LowStockEntry { RestockMode = mode, Status = status };
+        Assert.Equal(expected, entry.EffectiveRestockMode);
     }
 
     [Fact]
-    public void Reports_a_skip_without_inventing_a_price_or_using_the_floor_as_one()
+    public void Old_trial_entries_default_to_alert()
+    {
+        var entry = System.Text.Json.JsonSerializer.Deserialize<LowStockEntry>("""{"ItemId":50970,"Status":2}""");
+        Assert.NotNull(entry);
+        Assert.Equal(StockRestockMode.Default, entry.RestockMode);
+        Assert.Equal(StockRestockMode.Alert, entry.EffectiveRestockMode);
+    }
+
+    [Fact]
+    public void Alert_entries_do_not_take_the_last_slot_from_an_auto_entry()
+    {
+        var a = Retainer("A", Enumerable.Repeat(Listed(Other + 1, 1, 100), 19).ToArray());
+        a.Inventory.AddRange([Stock(Twine, 1), Stock(Twine, 1, hq: true), Stock(Other, 1)]);
+        var trial = new LowStockEntry { ItemId = Twine, Status = StockStatus.Trial };
+        var alert = new LowStockEntry { ItemId = Other, RestockMode = StockRestockMode.Alert };
+        var auto = new LowStockEntry { ItemId = Twine, IsHq = true, Status = StockStatus.Trial, RestockMode = StockRestockMode.Auto };
+
+        var result = Assert.Single(Plan([trial, alert, auto], [a]));
+
+        Assert.True(Assert.Single(result.Actions).IsHQ);
+    }
+
+    [Fact]
+    public void Leaves_unlisted_item_price_for_execution()
+    {
+        var a = Retainer("A", Listed(Twine, 7, 800, hq: true));
+        a.Inventory.Add(Stock(Twine, 1));
+        var plan = Assert.Single(Plan([Watch(Twine)], [a], floor: 750));
+
+        Assert.Equal(AutoRestockPriceKind.Pending, plan.PriceKind);
+        var action = Assert.Single(plan.Actions);
+        Assert.True(action.ResolveRestockPrice);
+        Assert.Equal(0, action.UnitPrice);
+    }
+
+    [Fact]
+    public void Skips_an_unknown_listing_price_and_an_invalid_floor()
     {
         var a = Retainer("A");
         a.Inventory.Add(Stock(Twine, 1));
-        var result = Assert.Single(Plan([Watch(Twine)], [a], floor: 750));
-        Assert.Empty(result.Actions);
-        Assert.Equal(AutoRestockPriceKind.NoMarketOrSale, result.PriceKind);
-
-        var invalidFloor = Assert.Single(Plan([Watch(Twine)], [a], market: Cache(Now, nq: 100), floor: (long)uint.MaxValue + 1));
-        Assert.Empty(invalidFloor.Actions);
-        Assert.Equal(AutoRestockPriceKind.OutOfRange, invalidFloor.PriceKind);
+        var invalid = Assert.Single(Plan([Watch(Twine)], [a], floor: (long)uint.MaxValue + 1));
+        Assert.Empty(invalid.Actions);
+        Assert.Equal(AutoRestockPriceKind.OutOfRange, invalid.PriceKind);
 
         a.Listings.Add(Listed(Twine, 1, 0));
-        var missingListingPrice = Assert.Single(Plan([new LowStockEntry { ItemId = Twine, Target = 2 }], [a],
-            market: Cache(Now, nq: 100)));
-        Assert.Empty(missingListingPrice.Actions);
-        Assert.Equal(AutoRestockPriceKind.UnknownListingPrice, missingListingPrice.PriceKind);
+        var unpriced = Assert.Single(Plan([new LowStockEntry { ItemId = Twine, Target = 2 }], [a]));
+        Assert.Empty(unpriced.Actions);
+        Assert.Equal(AutoRestockPriceKind.UnknownListingPrice, unpriced.PriceKind);
     }
 
-    [Fact]
-    public void Another_home_worlds_fresh_scan_and_sale_cannot_price_a_restock()
+    [Theory]
+    [InlineData("no stock", (int)RestockSkipReason.NoStock)]
+    [InlineData("full", (int)RestockSkipReason.NoSlot)]
+    [InlineData("preferred full", (int)RestockSkipReason.PreferredRetainerFull)]
+    [InlineData("stock on full retainer", (int)RestockSkipReason.SourceRetainerFull)]
+    public void Explains_why_a_valid_price_has_no_rows(string scenario, int expected)
     {
-        var a = Retainer("1.A");
-        a.WorldId = 2;
-        a.Inventory.Add(Stock(Twine, 1));
-        var tracker = Tracker(Sale(Twine, "2.B", 45), Sale(Twine, "1.F", 500, when: Now.AddDays(-1)));
-        var cache = new MarketCache { Clock = () => Now };
-        cache.Replace(Twine, new MarketScan([new(20, "Other", 1)], []) { WorldId = 1 });
-        var result = Assert.Single(Plan([Watch(Twine)], [a], tracker: tracker, market: cache));
-        Assert.Equal(500, Assert.Single(result.Actions).UnitPrice);
-    }
+        var a = Retainer("A", Listed(Twine, 1, 100));
+        a.RetainerName = "RetainerA";
+        var entry = new LowStockEntry { ItemId = Twine, Target = 2 };
+        var retainers = new[] { a };
+        if (scenario != "no stock")
+        {
+            a.Inventory.Add(Stock(Twine, 1));
+            a.Listings.AddRange(Enumerable.Repeat(Listed(Other, 1, 100), 19));
+        }
+        if (scenario == "preferred full") entry.PreferredRetainers[1] = "RetainerA";
+        if (scenario == "stock on full retainer") retainers = [a, Retainer("B")];
 
-    [Fact]
-    public void Net_sale_that_cannot_represent_a_whole_gil_unit_price_is_skipped()
-    {
-        var a = Retainer("A");
-        a.Inventory.Add(Stock(Twine, 1));
-        var sale = Sale(Twine, "A", gross: null, quantity: 3);
-        sale.SoldTotalGil = 100;
-        var result = Assert.Single(Plan([Watch(Twine)], [a], tracker: Tracker(sale)));
-        Assert.Empty(result.Actions);
+        var plan = Assert.Single(Plan([entry], retainers));
+        Assert.Empty(plan.Actions);
+        Assert.Equal(AutoRestockPriceKind.Listing, plan.PriceKind);
+        Assert.Equal((RestockSkipReason)expected, plan.SkipReason);
     }
 
     [Fact]
@@ -185,10 +141,12 @@ public class AutoRestockPlannerTests
         var b = Retainer("B", Enumerable.Repeat(Listed(Other, 1, 100), 20).ToArray());
         var ch = new CharacterSnapshot { CharacterContentId = 1, Bag = [Stock(Twine, 2), Stock(Twine, 2, hq: true)] };
 
-        var result = Assert.Single(Plan([Watch(Twine), Watch(Twine, hq: true)], [a, b],
-            character: ch, market: Cache(Now, nq: 100, hq: 200)));
+        var plans = Plan([Watch(Twine), Watch(Twine, hq: true)], [a, b], character: ch);
 
-        var action = Assert.Single(result.Actions);
+        Assert.Equal(2, plans.Count);
+        Assert.Equal(RestockSkipReason.NoSlot, plans[1].SkipReason);
+        Assert.Empty(plans[1].Actions);
+        var action = Assert.Single(plans[0].Actions);
         Assert.Equal("A", action.RetainerKey);
         Assert.False(action.IsHQ);
     }
@@ -198,7 +156,7 @@ public class AutoRestockPlannerTests
     {
         var a = Retainer("A");
         a.Inventory.Add(Stock(Twine, 2));
-        var result = Assert.Single(Plan([Watch(Twine), Watch(Twine)], [a], market: Cache(Now, nq: 100)));
+        var result = Assert.Single(Plan([Watch(Twine), Watch(Twine)], [a]));
         Assert.Equal(1, Assert.Single(result.Actions).Quantity);
     }
 
@@ -237,7 +195,7 @@ public class AutoRestockPlannerTests
             Saddlebag = [Stock(Twine, 10, max: 2)], PremiumSaddlebag = [Stock(Twine, 5)],
         };
         var entry = new LowStockEntry { ItemId = Twine, Target = 16, PerListing = 5 };
-        var result = Assert.Single(Plan([entry], [a], character: ch, market: Cache(Now, nq: 100)));
+        var result = Assert.Single(Plan([entry], [a], character: ch));
 
         Assert.Equal(new[] { 1, 2, 1, 2, 2, 2, 2, 2, 2 }, result.Actions.Select(x => x.Quantity));
         Assert.Equal(new[] { "A", "char.1.bag", "char.1.bag" }, result.Actions.Take(3).Select(x => x.SourceKey));
@@ -245,9 +203,8 @@ public class AutoRestockPlannerTests
     }
 
     private static List<AutoRestockPlan> Plan(LowStockEntry[] entries, RetainerSnapshot[] retainers,
-        CharacterSnapshot? character = null, ListingTracker? tracker = null, MarketCache? market = null,
-        int scanAge = 6, int undercut = 1, long floor = 0, Func<uint, bool, bool>? held = null)
-        => AutoRestockPlanner.Plan(entries, retainers, character, tracker ?? new(), market, Now, scanAge, undercut,
+        CharacterSnapshot? character = null, long floor = 0, Func<uint, bool, bool>? held = null)
+        => AutoRestockPlanner.Plan(entries, retainers, character, new ListingTracker(),
             held ?? ((_, _) => false), (_, _) => floor);
 
     private static LowStockEntry Watch(uint id, bool hq = false) => new() { ItemId = id, IsHq = hq, Target = 1 };
@@ -257,18 +214,4 @@ public class AutoRestockPlannerTests
         => new() { ItemId = id, IsHQ = hq, Quantity = qty, UnitPrice = price };
     private static InventoryEntry Stock(uint id, int qty, bool hq = false, int max = 99)
         => new() { ItemId = id, IsHQ = hq, Quantity = qty, MaxStackPerListing = max };
-    private static ListingTracker Tracker(params ListingRecord[] sales) => new() { Records = sales.ToList() };
-    private static ListingRecord Sale(uint id, string key, long? gross, bool hq = false, int quantity = 1, DateTime? when = null)
-        => new()
-        {
-            ItemId = id, IsHq = hq, Quantity = quantity, RetainerKey = key, Outcome = ListingTracker.Sold,
-            SoldGrossGil = gross, SoldRecordedUtc = when ?? Now,
-        };
-
-    private static MarketCache Cache(DateTime scannedAt, long nq = 0, long hq = 0)
-    {
-        var cache = new MarketCache { Clock = () => scannedAt };
-        cache.Replace(Twine, new MarketScan([new MarketOffer(nq, "NQ", 1)], [new MarketOffer(hq, "HQ", 1)]));
-        return cache;
-    }
 }

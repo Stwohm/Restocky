@@ -94,6 +94,8 @@ public sealed class Configuration : IPluginConfiguration
 
     public bool AutoRestockDuringCycle { get; set; }
     public int AutoRestockMaxScanAgeHours { get; set; } = 6;
+    public int StockMaxAgeHours { get; set; } = 6;
+    public List<CachedMarketPrice> RestockMarketPrices { get; set; } = new();
 
     /// <summary>Chat channel (XivChatType value) for Restocky messages. Default 71 = RetainerSale,
     /// so a Chat 2 "Market" tab that shows Retainer Sale Notifications picks them up.</summary>

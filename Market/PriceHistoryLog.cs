@@ -18,6 +18,8 @@ public sealed class PriceHistoryRow
     public long NewPrice { get; init; }
     public bool Applied { get; init; }
     public RepriceReason Reason { get; init; }
+    internal long ClampedFloor { get; init; }
+    internal string? ErrorDetail { get; init; }
 
     /// <summary>Competitor retainers priced below our old price, ';'-separated.</summary>
     public string Undercutters { get; init; } = string.Empty;

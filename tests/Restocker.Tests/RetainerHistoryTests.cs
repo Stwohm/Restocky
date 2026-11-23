@@ -159,8 +159,8 @@ public class RetainerHistoryTests
                 Assert.Null(s.SoldGrossGil);
             });
             var csv = File.ReadAllLines(Path.Combine(dir.FullName, "listings.csv"));
-            Assert.EndsWith("days_listed,buyer,sale_time_utc,sold_gross_gil,is_mannequin,cost,profit", csv[0]);
-            Assert.Contains(csv, line => line.EndsWith(",BuyerA,2023-11-14T22:13:20Z,,true,,"));
+            Assert.EndsWith("days_listed,buyer,sale_time_utc,sold_gross_gil,is_mannequin,cost,profit,earning", csv[0]);
+            Assert.Contains(csv, line => line.EndsWith(",BuyerA,2023-11-14T22:13:20Z,,true,,,190"));
         }
         finally { dir.Delete(true); }
     }

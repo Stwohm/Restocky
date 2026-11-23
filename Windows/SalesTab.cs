@@ -197,7 +197,9 @@ public sealed class SalesTab
             ImGui.TableNextColumn(); ImGui.TextUnformatted(SalesVelocityDisplay.CompactCounts(velocity.Last30d));
             ImGui.TableNextColumn(); ImGui.TextUnformatted(SalesVelocityDisplay.Number(velocity.Last7d.AverageHoursBetweenSales));
             ImGui.TableNextColumn(); ImGui.TextUnformatted(SalesVelocityDisplay.Number(velocity.Last30d.AverageHoursBetweenSales));
-            ImGui.TableNextColumn(); ImGui.TextUnformatted(SalesVelocityDisplay.Number(velocity.DaysOfStock(supply.Listed, supply.Available)));
+            ImGui.TableNextColumn();
+            ImGui.TextUnformatted(SalesVelocityDisplay.Number(velocity.DaysOfStock(supply.Listed, supply.Available)) + (supply.Provisional ? " ?" : ""));
+            if (supply.Provisional && ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.StockProvisional);
         }
         ImGui.EndTable();
     }

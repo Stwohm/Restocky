@@ -13,16 +13,17 @@ internal sealed record StackTopUp(int OriginalQuantity, int InventoryStackSize, 
 internal static class StackTopUpPlanner
 {
     internal static List<PlannedAction> Plan(uint itemId, bool hq, int maxPerListing, int inventoryStackSize,
-        IEnumerable<(string RetainerKey, ListingEntry Listing)> listings, List<RestockSource> remaining)
+        IEnumerable<(string RetainerKey, ListingEntry Listing)> listings, List<RestockSource> remaining, int perListing = 0)
     {
+        var limit = perListing > 0 ? Math.Min(perListing, maxPerListing) : maxPerListing;
         var actions = new List<PlannedAction>();
         foreach (var (retainerKey, listing) in listings
             .Where(x => x.Listing.ItemId == itemId && x.Listing.IsHQ == hq
-                && x.Listing.Quantity > 0 && x.Listing.Quantity < maxPerListing
+                && x.Listing.Quantity > 0 && x.Listing.Quantity < limit
                 && x.Listing.UnitPrice is > 0 and <= uint.MaxValue)
             .OrderByDescending(x => x.Listing.Quantity))
         {
-            var need = maxPerListing - listing.Quantity;
+            var need = limit - listing.Quantity;
             var retainer = Take(s => s.FixedTargetKey == retainerKey, ref need);
             var bag = Take(s => s.FixedTargetKey == null && s.SourceKey.EndsWith(".bag"), ref need);
             var saddle = Take(s => s.FixedTargetKey == null && s.SourceKey.EndsWith(".saddle"), ref need);

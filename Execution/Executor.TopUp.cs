@@ -23,7 +23,7 @@ public sealed unsafe partial class Executor
         internal TopUpSlot? ReturnedStack;
         internal TopUpMove? Move;
         internal int RetainerUnitsRemaining = retainerUnits;
-        internal int? RelistSourceAfter;
+        internal int? BagBeforeRelist;
         internal DateTime Deadline;
     }
 
@@ -38,7 +38,7 @@ public sealed unsafe partial class Executor
         var market = GetTopUpMarketSlot(im, action);
         if (Mode != ExecutionMode.ApplyActions || unconfirmedTopUpItems.Contains((action.ItemId, action.IsHQ))
             || !ValidWritePrice(action)
-            || !MatchesTopUpItem(market, action) || market->Quantity != topUp.OriginalQuantity
+            || !MatchesTopUpMarketItem(market, action) || market->Quantity != topUp.OriginalQuantity
             || im->GetRetainerMarketPrice((short)action.ListingIndex) != (ulong)action.UnitPrice)
         {
             FailTopUp("planned listing is no longer available");
@@ -80,14 +80,25 @@ public sealed unsafe partial class Executor
         }
 
         var bag = ReadTopUpStacks(im, CharBagContainers, action);
-        if (run.RelistSourceAfter is { } relistSourceAfter)
+        if (run.BagBeforeRelist is { } bagBeforeRelist)
         {
-            if (MatchesTopUpItem(market, action) && market->Quantity == action.Quantity
-                && im->GetRetainerMarketPrice((short)action.ListingIndex) == (ulong)action.UnitPrice
-                && TopUpQuantity(im, run.ReturnedStack!.Value, action) == relistSourceAfter)
+            var price = (long)im->GetRetainerMarketPrice((short)action.ListingIndex);
+            var bagDecrement = bagBeforeRelist - bag.Values.Sum();
+            // The slot and bag can settle before the price. Keep polling until the write deadline.
+            if (TopUpReadback.Confirmed(MatchesTopUpMarketItem(market, action), market->Quantity, action.Quantity,
+                    price, action.UnitPrice, bagDecrement))
+            {
+                RunHistory?.Add(new RunEntry(CurrentJob.RetainerName, RunEntryKind.TopUp,
+                    string.Format(Strings.RunTopUpDone, AutoRestockItemName(action.ItemId, action.IsHQ),
+                        topUp.OriginalQuantity, action.Quantity, action.UnitPrice)));
                 FinishTopUp();
+            }
             else
+            {
+                if (DateTime.UtcNow >= run.Deadline)
+                    log.Debug($"[Restocker] top-up relist readback market#{action.ListingIndex}: item={market->ItemId}/{action.ItemId} flags={market->Flags} qty={market->Quantity}/{action.Quantity} price={price}/{action.UnitPrice} bag decrement={bagDecrement}/{action.Quantity}");
                 AwaitTopUpReadback(run, "relist was not confirmed");
+            }
             return;
         }
 
@@ -154,7 +165,7 @@ public sealed unsafe partial class Executor
             FailTopUp("original price no longer meets the configured floor");
             return;
         }
-        run.RelistSourceAfter = stackQuantity - action.Quantity;
+        run.BagBeforeRelist = bag.Values.Sum();
         WaitForTopUpWrite(run);
         im->MoveToRetainerMarket(destination.Container, (ushort)destination.Index, InventoryType.RetainerMarket,
             (ushort)action.ListingIndex, (uint)action.Quantity, (uint)action.UnitPrice);
@@ -224,6 +235,10 @@ public sealed unsafe partial class Executor
         => item != null && item->ItemId == action.ItemId
             && item->Flags == (action.IsHQ ? InventoryItem.ItemFlags.HighQuality : InventoryItem.ItemFlags.None);
 
+    private static bool MatchesTopUpMarketItem(InventoryItem* item, PlannedAction action)
+        => item != null && item->ItemId == action.ItemId
+            && ((item->Flags & InventoryItem.ItemFlags.HighQuality) != 0) == action.IsHQ;
+
     private static Dictionary<TopUpSlot, int> ReadTopUpStacks(InventoryManager* im, InventoryType[] types, PlannedAction action)
     {
         var result = new Dictionary<TopUpSlot, int>();
@@ -287,35 +302,38 @@ public sealed unsafe partial class Executor
         var name = AutoRestockItemName(action.ItemId, action.IsHQ);
         var retainer = CurrentJob.RetainerName;
         log.Warning($"[Restocker] top-up skipped retainer={retainer} market#{action.ListingIndex} item={action.ItemId} hq={action.IsHQ}: {reason}");
+        string message;
         if (pendingTopUp is { } run)
         {
             var im = InventoryManager.Instance();
             var bagCount = ReadTopUpStacks(im, CharBagContainers, action).Values.Sum();
             var market = GetTopUpMarketSlot(im, action);
-            if (run.ReturnedStack == null && MatchesTopUpItem(market, action)
+            if (run.ReturnedStack == null && MatchesTopUpMarketItem(market, action)
                 && market->Quantity == action.TopUp!.OriginalQuantity
                 && im->GetRetainerMarketPrice((short)action.ListingIndex) == (ulong)action.UnitPrice
                 && bagCount == run.BagBefore.Values.Sum())
             {
-                Plugin.ChatPrint(string.Format(Strings.TopUpStillListed, name, retainer, market->Quantity));
-                FinishTopUp();
-                return;
+                message = string.Format(Strings.TopUpStillListed, name, retainer, market->Quantity);
             }
-
-            // Keep a withdrawn or unresolved stack available for recovery.
-            unconfirmedTopUpItems.Add((action.ItemId, action.IsHQ));
-            if (market != null && market->ItemId == 0 && bagCount >= run.BagBefore.Values.Sum() + action.TopUp!.OriginalQuantity)
-                Plugin.ChatPrint(string.Format(Strings.TopUpInBag, name, retainer, bagCount, action.TopUp.OriginalQuantity));
             else
             {
-                var retainerCount = market != null
-                    ? ReadTopUpStacks(im, RetainerInventoryContainersStatic, action).Values.Sum().ToString("N0")
-                    : "?";
-                Plugin.ChatPrint(string.Format(Strings.TopUpUnconfirmed, name, retainer, bagCount, retainerCount, action.ListingIndex + 1));
+                // Keep a withdrawn or unresolved stack available for recovery.
+                unconfirmedTopUpItems.Add((action.ItemId, action.IsHQ));
+                if (market != null && market->ItemId == 0 && bagCount >= run.BagBefore.Values.Sum() + action.TopUp!.OriginalQuantity)
+                    message = string.Format(Strings.TopUpInBag, name, retainer, bagCount, action.TopUp.OriginalQuantity);
+                else
+                {
+                    var retainerCount = market != null
+                        ? ReadTopUpStacks(im, RetainerInventoryContainersStatic, action).Values.Sum().ToString("N0")
+                        : "?";
+                    message = string.Format(Strings.TopUpUnconfirmed, name, retainer, bagCount, retainerCount, action.ListingIndex + 1);
+                }
             }
         }
         else
-            Plugin.ChatPrint(string.Format(Strings.TopUpSkipped, name, retainer));
+            message = string.Format(Strings.TopUpSkipped, name, retainer);
+        Plugin.ChatPrint(message);
+        RunHistory?.Add(new RunEntry(retainer, RunEntryKind.Error, message));
         FinishTopUp();
     }
 

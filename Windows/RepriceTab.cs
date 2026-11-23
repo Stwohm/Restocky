@@ -344,22 +344,44 @@ public sealed class RepriceTab
 
         foreach (var listing in snap.Listings)
         {
+            var matchQuality = configuration.MatchQuality.For(listing.ItemId, listing.IsHQ);
+            var held = respectHold && configuration.IsHeld(listing.ItemId, listing.IsHQ);
+            var freshData = marketCache.HasDataSince(listing.ItemId, since);
+            var timedOut = !freshData && executor.MarketFetchTimedOut(listing.ItemId);
+            var floor = configuration.EffectiveFloorFor(listing.ItemId, listing.IsHQ, costLedger);
+            var offers = !held && freshData ? marketCache.GetOffers(listing.ItemId, listing.IsHQ, matchQuality) : [];
+            var decision = held || !freshData
+                ? new RepriceDecision(listing.UnitPrice, false, held ? RepriceReason.Held : timedOut ? RepriceReason.NoData : RepriceReason.Error, 0)
+                : RepriceRules.Decide(listing.UnitPrice, offers.Select(o => o.Price).ToArray(), floor.Price, settings);
+            var lowest = decision.LowestCompetitor;
+            var dropped = BaitFinder.Dropped(offers, lowest);
+            Plugin.Instance.ListingScans.RecordDecision(snap.Key, listing.ListingIndex, listing.ItemId, listing.IsHQ,
+                DateTime.UtcNow, decision.MarkForReview ? decision with { Apply = true } : decision, matchQuality, dropped);
+
             var name = sheet.TryGetRow(listing.ItemId, out var row) ? row.Name.ExtractText() : $"#{listing.ItemId}";
             if (listing.IsHQ) name += " (HQ)";
-            if (filter.Length > 0 && !name.Contains(filter, System.StringComparison.OrdinalIgnoreCase)) continue;
+            var visible = filter.Length == 0 || name.Contains(filter, StringComparison.OrdinalIgnoreCase);
+            if (respectHold && visible)
+                executor.RecordRunDecision(new PriceHistoryRow
+                {
+                    Retainer = snap.RetainerName, Slot = listing.ListingIndex, ItemId = listing.ItemId,
+                    Hq = listing.IsHQ, OldPrice = listing.UnitPrice, NewPrice = decision.NewPrice,
+                    Reason = decision.Reason, LowestCompetitor = lowest, ClampedFloor = decision.ClampedFloor,
+                }, prefill: true);
+            if (!visible) continue;
 
             var baitKey = (listing.ListingIndex, listing.ItemId, listing.IsHQ);
             baitPrices.Remove(baitKey);
             seen.Add((listing.ItemId, listing.IsHQ));
-            if (respectHold && configuration.IsHeld(listing.ItemId, listing.IsHQ))
+            if (held)
             {
                 editedPrice[EditKey(snap.Key, listing)] = (listing.UnitPrice, false);
                 Plugin.Log.Information($"  slot={listing.ListingIndex} item={listing.ItemId} hq={listing.IsHQ} name='{name}' HELD (left at {listing.UnitPrice:N0})");
                 continue;
             }
-            if (!marketCache.HasDataSince(listing.ItemId, since))
+            if (!freshData)
             {
-                if (executor.MarketFetchTimedOut(listing.ItemId))
+                if (timedOut)
                 {
                     editedPrice[EditKey(snap.Key, listing)] = (listing.UnitPrice, false);
                     Plugin.ChatPrint($"{name} [{snap.RetainerName} #{listing.ListingIndex}] {string.Format(Strings.KeptPrice, listing.UnitPrice, Strings.NoMarketData)}");
@@ -371,13 +393,7 @@ public sealed class RepriceTab
                 continue;
             }
             var current = listing.UnitPrice;
-            var floor = configuration.EffectiveFloorFor(listing.ItemId, listing.IsHQ, costLedger);
-            var matchQuality = configuration.MatchQuality.For(listing.ItemId, listing.IsHQ);
-            var offers = marketCache.GetOffers(listing.ItemId, listing.IsHQ, matchQuality);
-            var decision = RepriceRules.Decide(current, offers.Select(o => o.Price).ToArray(), floor.Price, settings);
-            var lowest = decision.LowestCompetitor;
             var competitor = MarketOfferFormat.RepriceCompetitor(offers, matchQuality, lowest);
-            var dropped = BaitFinder.Dropped(offers, lowest);
             if (dropped.Count > 0)
             {
                 baitPrices[baitKey] = dropped[0].Price;
@@ -445,6 +461,15 @@ public sealed class RepriceTab
     /// <summary>同じ (retainer, slot) のプランは上書き、無ければ追加。</summary>
     private void UpsertPlan(RepricePlan plan)
     {
+        var scans = Plugin.Instance.ListingScans;
+        var previous = scans.GetDecision(plan.RetainerKey, plan.ListingIndex, plan.ItemId, plan.IsHQ);
+        if (previous?.Decision.NewPrice != plan.NewPrice)
+        {
+            var guard = RepriceRules.LimitExceeded(plan.OldPrice, plan.NewPrice, configuration.MaxDropPercent, configuration.MaxRaisePercent);
+            var decision = new RepriceDecision(plan.NewPrice, true, guard ?? RepriceReason.Manual, 0);
+            scans.RecordDecision(plan.RetainerKey, plan.ListingIndex, plan.ItemId, plan.IsHQ, DateTime.UtcNow,
+                decision, configuration.MatchQuality.For(plan.ItemId, plan.IsHQ), []);
+        }
         for (var i = 0; i < pendingPlans.Count; i++)
         {
             var p = pendingPlans[i];
@@ -481,16 +506,16 @@ public sealed class RepriceTab
             ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp |
             ImGuiTableFlags.NoSavedSettings | ImGuiTableFlags.Sortable;
 
-        // Fork: #, Item, Qty, Current, undercutters icon, New, Profit, Hold, fill, +Add = 10
-        if (!ImGui.BeginTable(listingTableId, 10, flags)) return;
+        if (!ImGui.BeginTable(listingTableId, 11, flags)) return;
 
         SetupSortableColumn("#", ImGuiTableColumnFlags.WidthFixed, 30, RepriceSortColumn.Slot);
         SetupSortableColumn(Strings.ColItem, ImGuiTableColumnFlags.WidthStretch, 0.42f, RepriceSortColumn.Item);
         SetupSortableColumn(Strings.ColTotalQty, ImGuiTableColumnFlags.WidthFixed, 60, RepriceSortColumn.Quantity);
-        SetupSortableColumn(Strings.ColCurrentPrice, ImGuiTableColumnFlags.WidthStretch, 0.2f, RepriceSortColumn.CurrentPrice);
+        SetupSortableColumn($"{Strings.ColCurrentPrice} ({Strings.GilPerUnit})", ImGuiTableColumnFlags.WidthStretch, 0.2f, RepriceSortColumn.CurrentPrice);
         const ImGuiTableColumnFlags fixedNoSort = ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoSort;
         ImGui.TableSetupColumn("##cheaper", fixedNoSort, 24);
-        ImGui.TableSetupColumn(Strings.ColNewPrice, ImGuiTableColumnFlags.WidthStretch | ImGuiTableColumnFlags.NoSort, 0.2f);
+        ImGui.TableSetupColumn($"{Strings.ColNewPrice} ({Strings.GilPerUnit})", ImGuiTableColumnFlags.WidthStretch | ImGuiTableColumnFlags.NoSort, 0.2f);
+        ImGui.TableSetupColumn(Strings.ColWhy, fixedNoSort, ImGui.CalcTextSize(Strings.ColWhy).X);
         ImGui.TableSetupColumn(Strings.ColProfit, fixedNoSort, 105);
         ImGui.TableSetupColumn(Strings.ColHold, fixedNoSort, 55);
         ImGui.TableSetupColumn("##fill", fixedNoSort, 70);
@@ -530,6 +555,8 @@ public sealed class RepriceTab
             var editKey = EditKey(snap.Key, l);
             DrawPriceInput(editKey, l);
             ImGui.TableNextColumn();
+            DrawPriceDecision(snap.Key, l, now);
+            ImGui.TableNextColumn();
             var returns = DrawProfit(l, editedPrice.GetValueOrDefault(editKey).Price);
             profit += returns.Profit.GetValueOrDefault();
             earning += returns.Earning.GetValueOrDefault();
@@ -543,6 +570,29 @@ public sealed class RepriceTab
 
         ImGui.EndTable();
         ImGui.TextUnformatted(string.Format(Strings.ProfitEarningTotals, profit.ToString("N0"), earning.ToString("N0")));
+    }
+
+    private static void DrawPriceDecision(string key, ListingEntry listing, DateTime nowUtc)
+    {
+        var scans = Plugin.Instance.ListingScans;
+        var scan = scans.Get(key, listing.ListingIndex, listing.ItemId, listing.IsHQ);
+        var last = scans.GetDecision(key, listing.ListingIndex, listing.ItemId, listing.IsHQ);
+        ImGui.TextDisabled(last != null || scan != null ? "(?)" : "—");
+        if (!ImGui.IsItemHovered()) return;
+
+        ImGui.BeginTooltip();
+        if (last is { } result)
+        {
+            ImGui.TextUnformatted(Strings.PriceDecisionLabel(result.Decision));
+            if (result.Decision.ClampedFloor > 0 && result.Decision.Reason != RepriceReason.Floor)
+                ImGui.TextUnformatted(string.Format(Strings.DecisionFloor, result.Decision.ClampedFloor));
+            foreach (var bait in result.Bait)
+                ImGui.TextUnformatted(string.Format(Strings.DecisionBait, bait.Seller, bait.Quantity, bait.Price));
+            ImGui.TextUnformatted(Strings.DecisionPool(result.MatchQuality, listing.IsHQ));
+        }
+        else ImGui.TextUnformatted(Strings.DecisionNone);
+        ImGui.TextUnformatted(Strings.DecisionScanAge(scan is { } s ? nowUtc - s.ScannedUtc : null));
+        ImGui.EndTooltip();
     }
 
     private void SetupSortableColumn(string label, ImGuiTableColumnFlags flags, float width, RepriceSortColumn column)
@@ -799,8 +849,8 @@ public sealed class RepriceTab
         if (!ImGui.IsItemHovered()) return;
 
         var floor = configuration.EffectiveFloorFor(listing.ItemId, listing.IsHQ, costLedger);
-        if (floor.Price <= 0 && !warning.HasValue) return;
         ImGui.BeginTooltip();
+        ImGui.TextUnformatted($"{Strings.ColNewPrice} ({Strings.GilPerUnit})");
         if (floor.Price > 0)
             ImGui.TextUnformatted(string.Format(floor.FromCost ? Strings.CostFloorTooltip : Strings.ManualFloorTooltip, floor.Price));
         if (warning.HasValue)
@@ -819,6 +869,8 @@ public sealed class RepriceTab
                 var decision = RepriceRules.Decide(l.UnitPrice, [bait], floor.Price,
                     configuration.ToRepriceSettings(undercutDelta), includeBait: true);
                 editedPrice[key] = (decision.NewPrice, floor.FromCost && decision.Reason == RepriceReason.Floor);
+                Plugin.Instance.ListingScans.RecordDecision(snap.Key, l.ListingIndex, l.ItemId, l.IsHQ, DateTime.UtcNow,
+                    decision.MarkForReview ? decision with { Apply = true } : decision, configuration.MatchQuality.For(l.ItemId, l.IsHQ), []);
                 RemovePlanIfExists(snap.Key, l.ListingIndex);
             }
             if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.MatchBaitPrefill);
@@ -879,8 +931,8 @@ public sealed class RepriceTab
         ImGui.TableSetupColumn(Strings.ColItem, ImGuiTableColumnFlags.WidthStretch, 0.4f);
         ImGui.TableSetupColumn(Strings.ColTarget, ImGuiTableColumnFlags.WidthStretch, 0.2f);
         ImGui.TableSetupColumn(Strings.ColTotalQty, ImGuiTableColumnFlags.WidthFixed, 60);
-        ImGui.TableSetupColumn(Strings.ColCurrentPrice, ImGuiTableColumnFlags.WidthStretch, 0.2f);
-        ImGui.TableSetupColumn(Strings.ColNewPrice, ImGuiTableColumnFlags.WidthStretch, 0.2f);
+        ImGui.TableSetupColumn($"{Strings.ColCurrentPrice} ({Strings.GilPerUnit})", ImGuiTableColumnFlags.WidthStretch, 0.2f);
+        ImGui.TableSetupColumn($"{Strings.ColNewPrice} ({Strings.GilPerUnit})", ImGuiTableColumnFlags.WidthStretch, 0.2f);
         ImGui.TableSetupColumn("##rm", ImGuiTableColumnFlags.WidthFixed, 50);
         ImGui.TableHeadersRow();
 

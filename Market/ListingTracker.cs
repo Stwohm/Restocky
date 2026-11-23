@@ -87,8 +87,7 @@ public sealed class ListingRecord
     [JsonIgnore]
     public DateTime? RecordedSaleUtc => SaleTimeUtc ?? SoldRecordedUtc ?? EndedUtc;
     [JsonIgnore]
-    public decimal? RealizedProfit => Outcome == ListingTracker.Sold && (SoldTotalGil > 0 || HistoryKey != null)
-        ? SoldTotalGil - ConsumedCost : null;
+    public decimal? RealizedProfit => Outcome == ListingTracker.Sold ? SaleReturn.Realized(this).Profit : null;
     public double? DaysListed => !HistoryOnly && EndedUtc is { } e ? (e - FirstSeenUtc).TotalDays : null;
 }
 
@@ -120,9 +119,28 @@ public sealed class ListingTracker(SaleCostConsumer? consumeCost = null)
 
     /// <summary>Set by every mutation; the owner saves and clears it.</summary>
     public bool Dirty { get; set; }
+    internal event Action<ListingRecord, DateTime>? ListingSold;
+
+    // A provisional absence is still listed until a sale or a confirmed disappearance.
+    internal IEnumerable<ListingRecord> ActiveListings => Records.Where(r => r.Outcome == Active);
 
     public IEnumerable<ListingRecord> ActiveFor(uint itemId, bool hq)
-        => Records.Where(r => r.Outcome == Active && r.ItemId == itemId && r.IsHq == hq);
+        => ActiveListings.Where(r => r.ItemId == itemId && r.IsHq == hq);
+
+    internal (int Listed, bool Provisional) ListedStock(uint itemId, bool hq, IReadOnlySet<string> retainers)
+    {
+        var listed = 0;
+        var provisional = false;
+        foreach (var listing in ActiveFor(itemId, hq, retainers))
+        {
+            listed += listing.Quantity;
+            provisional |= listing.MissingSinceUtc != null;
+        }
+        return (listed, provisional);
+    }
+
+    internal IEnumerable<ListingRecord> ActiveFor(uint itemId, bool hq, IReadOnlySet<string> retainers)
+        => ActiveFor(itemId, hq).Where(r => retainers.Contains(r.RetainerKey));
 
     internal List<string> PreferredRetainers(uint itemId, bool hq, IReadOnlySet<string> keys)
         => Records.Where(r => r.ItemId == itemId && r.IsHq == hq && keys.Contains(r.RetainerKey))
@@ -218,8 +236,12 @@ public sealed class ListingTracker(SaleCostConsumer? consumeCost = null)
 
     /// <summary>A fresh market answer for (item, hq) from our own fetch.</summary>
     public void ObserveCompetitors(uint itemId, bool hq, IReadOnlyList<MarketOffer> offers, DateTime nowUtc)
+        => ObserveCompetitors(itemId, hq, offers, nowUtc, null);
+
+    internal void ObserveCompetitors(uint itemId, bool hq, IReadOnlyList<MarketOffer> offers, DateTime nowUtc,
+        IReadOnlySet<string>? retainers)
     {
-        foreach (var rec in ActiveFor(itemId, hq))
+        foreach (var rec in retainers == null ? ActiveFor(itemId, hq) : ActiveFor(itemId, hq, retainers))
         {
             var undercut = false;
             // One observation per seller, even if they have several listings up.
@@ -264,9 +286,13 @@ public sealed class ListingTracker(SaleCostConsumer? consumeCost = null)
     /// retainer or the stack, so the active listing whose qty x price (minus ~5% tax) is closest wins.
     /// </summary>
     public ListingRecord? OnSale(uint itemId, bool hq, long totalGil, DateTime nowUtc)
+        => OnSale(itemId, hq, totalGil, nowUtc, null);
+
+    internal ListingRecord? OnSale(uint itemId, bool hq, long totalGil, DateTime nowUtc, ulong? characterId)
     {
-        if (IsDuplicateSale(new[] { itemId }, totalGil, nowUtc, GameSaleSource)) return null;
-        var candidates = ActiveFor(itemId, hq).ToList();
+        var records = SaleCandidates(characterId);
+        if (IsDuplicateSale(records, new[] { itemId }, totalGil, nowUtc, GameSaleSource)) return null;
+        var candidates = records.Where(r => r.Outcome == Active && r.ItemId == itemId && r.IsHq == hq).ToList();
         if (candidates.Count == 0) return null;
         var rec = totalGil > 0
             ? candidates.OrderBy(r => Difference(r, totalGil)).First()
@@ -284,12 +310,17 @@ public sealed class ListingTracker(SaleCostConsumer? consumeCost = null)
         int quantity,
         long netGil,
         DateTime nowUtc)
+        => OnAllaganSale(candidateItemIds, quantity, netGil, nowUtc, null);
+
+    internal ListingRecord? OnAllaganSale(IReadOnlyCollection<uint> candidateItemIds, int quantity, long netGil,
+        DateTime nowUtc, ulong? characterId)
     {
         if (candidateItemIds.Count == 0 || quantity <= 0 || netGil <= 0) return null;
         var ids = candidateItemIds as HashSet<uint> ?? candidateItemIds.ToHashSet();
-        if (IsDuplicateSale(ids, netGil, nowUtc, AllaganMarketSaleSource)) return null;
+        var records = SaleCandidates(characterId);
+        if (IsDuplicateSale(records, ids, netGil, nowUtc, AllaganMarketSaleSource)) return null;
 
-        var active = Records.Where(r => r.Outcome == Active && ids.Contains(r.ItemId) && r.Quantity == quantity);
+        var active = records.Where(r => r.Outcome == Active && ids.Contains(r.ItemId) && r.Quantity == quantity);
         var rec = BestWithinTolerance(active, netGil);
         if (rec != null)
         {
@@ -297,7 +328,7 @@ public sealed class ListingTracker(SaleCostConsumer? consumeCost = null)
             return rec;
         }
 
-        var gone = Records.Where(r => r.Outcome == Gone && r.SoldTotalGil == 0
+        var gone = records.Where(r => r.Outcome == Gone && r.SoldTotalGil == 0
             && ids.Contains(r.ItemId) && r.Quantity == quantity && r.EndedUtc is { } ended
             && nowUtc >= ended && nowUtc - ended <= GoneSaleWindow);
         rec = BestWithinTolerance(gone, netGil);
@@ -419,11 +450,18 @@ public sealed class ListingTracker(SaleCostConsumer? consumeCost = null)
         return rec != null && Difference(rec, netGil) <= Tolerance(netGil) ? rec : null;
     }
 
-    private bool IsDuplicateSale(IEnumerable<uint> itemIds, long netGil, DateTime nowUtc, string source)
+    private IEnumerable<ListingRecord> SaleCandidates(ulong? characterId)
+    {
+        if (characterId == null) return Records;
+        var prefix = $"{characterId:X}.";
+        return Records.Where(r => r.RetainerKey.StartsWith(prefix, StringComparison.Ordinal));
+    }
+
+    private static bool IsDuplicateSale(IEnumerable<ListingRecord> records, IEnumerable<uint> itemIds, long netGil, DateTime nowUtc, string source)
     {
         if (netGil <= 0) return false;
         var ids = itemIds as ISet<uint> ?? itemIds.ToHashSet();
-        return Records.Any(r => r.Outcome == Sold && ids.Contains(r.ItemId) && r.SoldTotalGil > 0
+        return records.Any(r => r.Outcome == Sold && ids.Contains(r.ItemId) && r.SoldTotalGil > 0
             && !string.IsNullOrEmpty(r.SoldSource) && r.SoldSource != source
             && r.SoldRecordedUtc is { } recorded && nowUtc >= recorded
             && nowUtc - recorded <= DuplicateSaleWindow
@@ -433,6 +471,7 @@ public sealed class ListingTracker(SaleCostConsumer? consumeCost = null)
     private void MarkSold(ListingRecord rec, long totalGil, DateTime nowUtc, bool keepEndedUtc, string source,
         DateTime? saleUtc = null)
     {
+        var newlySold = rec.Outcome != Sold;
         // Fork: history enrichment updates proceeds and timing on the same sold record.
         if (rec.Outcome != Sold && rec.ConsumedCost == null && consumeCost != null)
             (rec.ConsumedCost, rec.UnknownCostUnits) = consumeCost(rec.ItemId, rec.IsHq, rec.Quantity, saleUtc ?? nowUtc);
@@ -444,6 +483,8 @@ public sealed class ListingTracker(SaleCostConsumer? consumeCost = null)
         rec.SoldSource = source;
         rec.MissingSinceUtc = null;
         Dirty = true;
+        if (newlySold && !rec.HistoryOnly && rec.Slot >= 0)
+            ListingSold?.Invoke(rec, saleUtc ?? rec.EndedUtc ?? nowUtc);
     }
 
     private static decimal Difference(ListingRecord rec, long netGil)
@@ -499,7 +540,7 @@ public sealed class ListingTracker(SaleCostConsumer? consumeCost = null)
     }
 
     public const string ListingsHeader =
-        "listing_id,retainer,item_id,item_name,hq,qty,first_seen_utc,first_price,last_price,reprice_count,undercut_count,undercutters,competitors,ended_utc,outcome,sold_total_gil,days_listed,buyer,sale_time_utc,sold_gross_gil,is_mannequin,cost,profit";
+        "listing_id,retainer,item_id,item_name,hq,qty,first_seen_utc,first_price,last_price,reprice_count,undercut_count,undercutters,competitors,ended_utc,outcome,sold_total_gil,days_listed,buyer,sale_time_utc,sold_gross_gil,is_mannequin,cost,profit,earning";
 
     public string ListingsCsv()
     {
@@ -513,6 +554,7 @@ public sealed class ListingTracker(SaleCostConsumer? consumeCost = null)
                 .OrderByDescending(c => c.TimesBelowUs).Select(c => $"{c.Seller} {c.MaxQuantity}x"));
             var competitors = string.Join(";", r.Competitors.Values.OrderByDescending(c => c.TimesSeen)
                 .Select(c => $"{c.Seller} {c.MaxQuantity}x"));
+            var returns = r.Outcome == Sold ? SaleReturn.Realized(r) : default;
             sb.AppendLine(string.Join(",",
                 r.Id,
                 Csv(r.RetainerName),
@@ -536,7 +578,8 @@ public sealed class ListingTracker(SaleCostConsumer? consumeCost = null)
                 r.SoldGrossGil?.ToString(inv) ?? string.Empty,
                 r.IsMannequin?.ToString().ToLowerInvariant() ?? string.Empty,
                 r.ConsumedCost?.ToString(inv) ?? string.Empty,
-                r.RealizedProfit?.ToString(inv) ?? string.Empty));
+                returns.Profit?.ToString(inv) ?? string.Empty,
+                returns.Earning?.ToString(inv) ?? string.Empty));
         }
         return sb.ToString();
     }

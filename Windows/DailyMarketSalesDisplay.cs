@@ -32,6 +32,7 @@ internal static class DailyMarketSalesDisplay
         }
 
         ImGui.TextUnformatted(string.Format(Strings.TodayMarketSales, daily.Total, daily.Matched, daily.Lost.Count));
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.UnmatchedMarketSalesHint);
         if (!itemId.HasValue)
         {
             ImGui.SameLine();
@@ -42,7 +43,11 @@ internal static class DailyMarketSalesDisplay
         }
 
         ImGui.TextDisabled(string.Format(Strings.ItemMarketScope, scans[0].ScannedUtc.ToLocalTime(), daily.RecordedOurs));
-        if (daily.Lost.Count > 0) ImGui.TextUnformatted(Strings.LostSalesLog);
+        if (daily.Lost.Count > 0)
+        {
+            ImGui.TextUnformatted(Strings.UnmatchedMarketSales);
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.UnmatchedMarketSalesHint);
+        }
         foreach (var sale in daily.Lost.Take(5))
             ImGui.TextUnformatted(string.Format(Strings.LostSaleRow,
                 sale.SoldUtc.ToLocalTime(), sale.Quantity, sale.UnitPrice, sale.IsHq ? Strings.QualityHq : Strings.QualityNq));

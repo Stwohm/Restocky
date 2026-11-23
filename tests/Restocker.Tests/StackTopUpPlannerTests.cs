@@ -10,6 +10,33 @@ public class StackTopUpPlannerTests
 {
     private const uint Sand = 1;
 
+    [Fact]
+    public void Ascendant_twine_at_one_per_listing_and_target_has_no_restock_plan()
+    {
+        List<RestockSource> stock = [new("char.1.bag", null, 3)];
+        var topUps = StackTopUpPlanner.Plan(Sand, false, 999, 999,
+            [("A", Listed(1, 0)), ("A", Listed(1, 1))], stock, perListing: 1);
+
+        Assert.Empty(topUps);
+        Assert.Empty(RestockPlanner.Plan(Sand, false, 2, 2, 1, 79_597, stock,
+            new Dictionary<string, int> { ["A"] = 18 }));
+        Assert.Equal(3, Assert.Single(stock).Available);
+    }
+
+    [Theory]
+    [InlineData(99, 999, 80)]
+    [InlineData(0, 75, 75)]
+    [InlineData(99, 75, 75)]
+    public void Fills_darksteel_with_available_units_up_to_the_entry_or_item_limit(int perListing, int max, int expected)
+    {
+        List<RestockSource> stock = [new("char.1.bag", null, 32)];
+        var action = Assert.Single(StackTopUpPlanner.Plan(Sand, false, max, 999,
+            [("A", Listed(48, 0))], stock, perListing));
+
+        Assert.Equal(expected, action.Quantity);
+        Assert.Equal(80 - expected, Assert.Single(stock).Available);
+    }
+
     [Theory]
     [InlineData(74, 0)]
     [InlineData(99, 0)]

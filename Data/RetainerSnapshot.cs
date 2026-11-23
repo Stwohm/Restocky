@@ -29,6 +29,7 @@ public sealed class RetainerSnapshot
 
     /// <summary>リテイナー所持品（出品ボックス除く、通常インベントリ）。</summary>
     public List<InventoryEntry> Inventory { get; set; } = new();
+    public Dictionary<uint, DateTime>? InventoryRefreshedUtc { get; set; }
 
     /// <summary>最終取得時刻（UTC）。UI 上の「N 日前」鮮度表示に使う。<see cref="DateTime.MinValue"/> なら未取得。</summary>
     public DateTime LastRefreshedUtc { get; set; } = DateTime.MinValue;
@@ -39,6 +40,14 @@ public sealed class RetainerSnapshot
         if (listing == null) return false;
         listing.UnitPrice = unitPrice;
         return true;
+    }
+
+    internal bool TryRemoveSoldListing(int slot, uint itemId, bool isHq, int quantity, long unitPrice, DateTime soldUtc)
+    {
+        // A newer read may contain a different listing in the same server slot.
+        if (slot < 0 || LastRefreshedUtc > soldUtc) return false;
+        return Listings.RemoveAll(l => l.ListingIndex == slot && l.ItemId == itemId && l.IsHQ == isHq
+            && l.Quantity == quantity && (l.UnitPrice <= 0 || unitPrice <= 0 || l.UnitPrice == unitPrice)) > 0;
     }
 
     public static string MakeKey(ulong characterContentId, ulong retainerId)

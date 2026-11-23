@@ -34,7 +34,10 @@ public sealed class PlannedAction
     public string SourceKey { get; set; } = string.Empty;
 
     internal string? PreferredRetainerFallback { get; init; }
+    internal DateTime? PreferredRetainerFullAtUtc { get; init; }
     internal bool StockRestock { get; init; }
+    internal bool ResolveRestockPrice { get; set; }
+    internal Restocker.Plan.RestockPrice? RestockPrice { get; set; }
     internal Restocker.Plan.StackTopUp? TopUp { get; init; }
 
     // ---- Fork: price-history context for Reprice actions (not persisted) ----
@@ -48,6 +51,7 @@ public sealed class PlannedAction
     public Restocker.Market.RepriceReason Reason { get; set; } = Restocker.Market.RepriceReason.Manual;
     internal bool BypassedMaxDrop { get; set; }
     internal bool MatchedBait { get; set; }
+    internal long ClampedFloor { get; set; }
 
     /// <summary>Competitor retainers below our old price when planned, ';'-separated.</summary>
     public string Undercutters { get; set; } = string.Empty;

@@ -6,6 +6,7 @@ using System.Threading;
 using Dalamud.Game.Network.Structures;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
+using FFXIVClientStructs.FFXIV.Client.UI.Info;
 
 namespace Restocker.Market;
 
@@ -59,13 +60,27 @@ public sealed unsafe class MarketWatcher : IDisposable
     }
 
     internal bool RecordEmptySearch(uint itemId)
+        => RecordSearchListings(itemId, []);
+
+    internal bool RecordSearchListings(uint itemId, ReadOnlySpan<MarketBoardListing> listings)
     {
         var player = objectTable.LocalPlayer;
         if (itemId == 0 || expectedItemId != itemId
             || !MarketWorldGate.Accept(player?.CurrentWorld.RowId ?? 0, player?.HomeWorld.RowId ?? 0))
             return false;
 
-        Cache.Replace(itemId, new MarketScan([], []) { WorldId = HomeWorldId });
+        var nq = new List<MarketOffer>();
+        var hq = new List<MarketOffer>();
+        foreach (ref readonly var listing in listings)
+        {
+            if (listing.ItemId != itemId || listing.UnitPrice == 0 || listing.Quantity is 0 or > int.MaxValue)
+                return false;
+            if (IsOwnRetainer(listing.RetainerId)) continue;
+            // The proxy supplies the retainer ID. CharacterName is the mannequin set's character.
+            var offer = new MarketOffer(listing.UnitPrice, $"#{listing.RetainerId:X}", (int)listing.Quantity);
+            (listing.IsHqItem ? hq : nq).Add(offer);
+        }
+        PublishOffers(itemId, new MarketScan(nq, hq) { WorldId = HomeWorldId });
         return true;
     }
 
@@ -170,16 +185,7 @@ public sealed unsafe class MarketWatcher : IDisposable
             // Both flags are always written (possibly empty) so "no HQ competitor" is a known
             // answer, not a timeout.
             var scan = new MarketScan(nqPrices, hqPrices) { WorldId = HomeWorldId };
-            Cache.Replace(itemId, scan);
-            if (expectedItemId.HasValue)
-            {
-                try
-                {
-                    CompetitorsObserved?.Invoke(itemId, scan);
-                }
-                catch (Exception ex) { log.Error(ex, "[Restocker] CompetitorsObserved handler threw"); }
-            }
-            OffersUpdated?.Invoke(itemId, scan, expectedItemId.HasValue);
+            PublishOffers(itemId, scan);
 
             dump.Append($"\n  → nq={nqPrices.Count} (lowest {Cache.GetLowest(itemId, false, true):N0})  hq={hqPrices.Count} (lowest {Cache.GetLowest(itemId, true, true):N0})");
             log.Information(dump.ToString());
@@ -188,6 +194,22 @@ public sealed unsafe class MarketWatcher : IDisposable
         {
             log.Error(ex, "[Restocker] OfferingsReceived handler exception");
         }
+    }
+
+    private void PublishOffers(uint itemId, MarketScan scan)
+    {
+        Cache.Replace(itemId, scan);
+        try
+        {
+            if (expectedItemId.HasValue) CompetitorsObserved?.Invoke(itemId, scan);
+        }
+        catch (Exception ex) { log.Error(ex, "[Restocker] CompetitorsObserved handler threw"); }
+
+        try
+        {
+            OffersUpdated?.Invoke(itemId, scan, expectedItemId.HasValue);
+        }
+        catch (Exception ex) { log.Error(ex, "[Restocker] market offers handler threw"); }
     }
 
     private static bool IsOwnRetainer(ulong retainerId)

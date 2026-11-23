@@ -58,15 +58,86 @@ public sealed class MarketScan
 
     public IReadOnlyList<MarketOffer> Competitors(bool isHQ, bool matchQuality)
         => matchQuality ? (isHQ ? hq : nq) : all;
+
+    internal long Lowest(bool isHq, bool matchQuality, long ourPrice = 0)
+        => LowestPriceResolver.Pick(Competitors(isHq, matchQuality).Select(o => o.Price).ToArray(), ourPrice: ourPrice);
+}
+
+public sealed record CachedMarketPrice(uint WorldId, uint ItemId, DateTime UpdatedUtc, long Nq, long Hq, long Combined)
+{
+    // Only the first three offers can affect the default two-offer bait filter.
+    public long[]? NqLowOffers { get; init; }
+    public long[]? HqLowOffers { get; init; }
+    public long[]? CombinedLowOffers { get; init; }
 }
 
 public sealed class MarketCache
 {
+    internal const int SavedPriceLimit = 512;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<uint, (MarketScan Scan, DateTime UpdatedUtc)> store = new();
+    private readonly Dictionary<(uint WorldId, uint ItemId), CachedMarketPrice> prices = new();
 
     public Func<DateTime> Clock { get; set; } = () => DateTime.UtcNow;
 
-    public void Replace(uint itemId, MarketScan scan) => store[itemId] = (scan, Clock());
+    public void Replace(uint itemId, MarketScan scan)
+    {
+        lock (prices)
+        {
+            var now = Clock();
+            store[itemId] = (scan, now);
+            if (scan.WorldId == 0 || itemId == 0) return;
+            var price = new CachedMarketPrice(scan.WorldId, itemId, now,
+                scan.Lowest(false, true), scan.Lowest(true, true), scan.Lowest(false, false));
+            prices[(scan.WorldId, itemId)] = price with
+            {
+                NqLowOffers = LowOffers(scan.Competitors(false, true), price.Nq),
+                HqLowOffers = LowOffers(scan.Competitors(true, true), price.Hq),
+                CombinedLowOffers = LowOffers(scan.Competitors(false, false), price.Combined),
+            };
+            if (prices.Count > SavedPriceLimit)
+                prices.Remove(prices.MinBy(p => p.Value.UpdatedUtc).Key);
+        }
+    }
+
+    private static long[]? LowOffers(IReadOnlyList<MarketOffer> offers, long picked)
+        => offers.Count > 0 && offers[0].Price < picked ? offers.Take(3).Select(o => o.Price).ToArray() : null;
+
+    private (long Lowest, DateTime UpdatedUtc)? SavedLowest(uint worldId, uint itemId, bool isHq, bool matchQuality, long ourPrice)
+    {
+        lock (prices)
+        {
+            if (!prices.TryGetValue((worldId, itemId), out var price)) return null;
+            var lowest = matchQuality ? (isHq ? price.Hq : price.Nq) : price.Combined;
+            var offers = matchQuality ? (isHq ? price.HqLowOffers : price.NqLowOffers) : price.CombinedLowOffers;
+            if (ourPrice > 0 && offers is { Length: > 0 and <= 3 })
+                lowest = LowestPriceResolver.Pick(offers, ourPrice: ourPrice);
+            return (lowest, price.UpdatedUtc);
+        }
+    }
+
+    internal (long Lowest, DateTime UpdatedUtc)? CachedLowest(uint worldId, uint itemId, bool isHq, bool matchQuality,
+        long ourPrice = 0)
+        => GetScan(itemId) is { } current && current.Scan.WorldId == worldId
+            ? (current.Scan.Lowest(isHq, matchQuality, ourPrice), current.UpdatedUtc)
+            : SavedLowest(worldId, itemId, isHq, matchQuality, ourPrice);
+
+    internal void RestorePrices(IEnumerable<CachedMarketPrice> saved)
+    {
+        lock (prices)
+        {
+            foreach (var price in saved.Where(p => p != null && p.WorldId != 0 && p.ItemId != 0)
+                .OrderByDescending(p => p.UpdatedUtc).DistinctBy(p => (p.WorldId, p.ItemId)).Take(SavedPriceLimit))
+                prices.TryAdd((price.WorldId, price.ItemId), price);
+            if (prices.Count > SavedPriceLimit)
+                foreach (var key in prices.OrderByDescending(p => p.Value.UpdatedUtc).Skip(SavedPriceLimit).Select(p => p.Key).ToArray())
+                    prices.Remove(key);
+        }
+    }
+
+    internal List<CachedMarketPrice> SavedPrices()
+    {
+        lock (prices) return prices.Values.ToList();
+    }
 
     internal (MarketScan Scan, DateTime UpdatedUtc)? GetScan(uint itemId)
         => store.TryGetValue(itemId, out var entry) ? entry : null;
@@ -79,5 +150,5 @@ public sealed class MarketCache
         => store.TryGetValue(itemId, out var entry) ? entry.Scan.Competitors(isHQ, matchQuality) : Array.Empty<MarketOffer>();
 
     public long GetLowest(uint itemId, bool isHQ, bool matchQuality, long ourPrice = 0)
-        => LowestPriceResolver.Pick(GetOffers(itemId, isHQ, matchQuality).Select(o => o.Price).ToArray(), ourPrice: ourPrice);
+        => GetScan(itemId)?.Scan.Lowest(isHQ, matchQuality, ourPrice) ?? 0;
 }

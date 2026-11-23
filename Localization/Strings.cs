@@ -1,5 +1,6 @@
 using Restocker.Market;
 using Restocker.Plan;
+using Restocker.Execution;
 
 namespace Restocker.Localization;
 
@@ -101,9 +102,7 @@ public static class Strings
     public static string StockTarget => T("Restock to", "補充目標", "Zielbestand", "Stock cible", "补货目标", "보충 목표");
     public static string StockRestock => T("Restock", "補充", "Auffüllen", "Réassort", "补货", "보충");
     public static string StockListAndPrice => T("List & price", "出品・価格設定", "Anbieten", "Mettre en vente", "上架并定价", "등록 및 가격 설정");
-    public static string StockHandoverUnavailable => T("the planned retainer’s sale list is closed", "出品先の販売リストが閉じています", "die Angebotsliste des vorgesehenen Gehilfen ist geschlossen", "la liste de vente du servant prévu est fermée", "所选雇员的出售列表已关闭", "지정한 집사의 판매 목록이 닫혀 있습니다");
     public static string StockNoMarketSlot => T("no free market slot", "空き出品枠なし", "kein freier Angebotsplatz", "aucun emplacement de vente libre", "没有空余挂单栏位", "빈 판매 칸 없음");
-    public static string StockHandoverFailed => T("List & price stopped ({0}). No listing was created.", "出品・価格設定を中止しました（{0}）。出品は作成されていません。", "Anbieten abgebrochen ({0}). Es wurde kein Angebot erstellt.", "Mise en vente interrompue ({0}). Aucune offre n’a été créée.", "已停止上架并定价（{0}）。未创建挂单。", "등록 및 가격 설정이 중단되었습니다 ({0}). 판매가 등록되지 않았습니다.");
     public static string PreferredRetainerFallback => T("{0}: {1} is unavailable for this listing. Auto selected {2}.", "{0}：{1} では出品できないため、{2} を自動選択しました。", "{0}: {1} steht für dieses Angebot nicht zur Verfügung. Automatisch gewählt: {2}.", "{0} : {1} est indisponible pour cette offre. Sélection automatique : {2}.", "{0}：无法通过 {1} 上架此挂单。已自动选择 {2}。", "{0}: {1}에 등록할 수 없어 {2}을(를) 자동으로 선택했습니다.");
     public static string StockTags => T("Tags", "タグ", "Tags", "Étiquettes", "标签", "태그");
     public static string StockKindLabel => T("Kind", "種類", "Art", "Type", "类型", "종류");
@@ -123,21 +122,50 @@ public static class Strings
         StockStatus.Trial => T("Trial", "試験", "Test", "Essai", "试销", "시험"),
         _ => NoStockTag,
     };
-    public static string AutoRestockScanAgeSetting => T("Auto-restock market scan max age (hours, 0 = off)", "補充に使う相場の有効時間（0で無効）", "Max. Alter der Marktabfrage (Stunden, 0 = aus)", "Âge max. du relevé pour le réassort (heures, 0 = désactivé)", "补货行情最长有效期（小时，0 为关闭）", "자동 보충 시세 유효 시간 (0 = 끄기)");
+    public static string AutoRestockScanAgeSetting => T("Restock cache max age (hours, 0 = off)", "補充に使う相場キャッシュの有効時間（0で無効）", "Max. Cache-Alter beim Auffüllen (Stunden, 0 = aus)", "Âge max. du cache pour le réassort (heures, 0 = désactivé)", "补货行情缓存最长有效期（小时，0 为关闭）", "보충 시세 캐시 유효 시간 (0 = 끄기)");
     public static string AutoRestocked => T("Restocked {0} {1:N0}x @ {2:N0} ({3})", "{0} を {1:N0} 個補充（単価 {2:N0}、{3}）", "{0} {1:N0}× zu {2:N0} aufgefüllt ({3})", "{0} réapprovisionné, {1:N0}× à {2:N0} ({3})", "已补货 {0} {1:N0} 件，单价 {2:N0}（{3}）", "{0} {1:N0}개 보충, 개당 {2:N0} ({3})");
     public static string AutoRestockSkipped => T("Skipped auto-restock for {0} ({1})", "{0} の自動補充をスキップ（{1}）", "Auto-Auffüllen für {0} übersprungen ({1})", "Réapprovisionnement auto de {0} ignoré ({1})", "已跳过 {0} 的自动补货（{1}）", "{0} 자동 보충 건너뜀 ({1})");
     public static string AutoRestockIncompleteSnapshots => T("Skipped auto-restock because some retainer listings could not be read.", "一部のリテイナーの出品を読み取れなかったため、自動補充をスキップしました。", "Auto-Auffüllen übersprungen, da Gehilfenangebote nicht gelesen werden konnten.", "Réapprovisionnement auto ignoré car certaines offres des servants étaient illisibles.", "无法读取部分雇员的挂单，已跳过自动补货。", "일부 집사의 판매 목록을 읽을 수 없어 자동 보충을 건너뛰었습니다.");
     public static string LowStockListing => T("{0}: listing {1:N0} unit(s) in {2:N0} listing(s) at {3:N0}", "{0} を {1:N0} 個、{2:N0} 件で出品（単価 {3:N0}）", "{0}: {1:N0} Stück in {2:N0} Angeboten zu {3:N0}", "{0} : {1:N0} unités en {2:N0} offres à {3:N0}", "{0}：{1:N0} 件分为 {2:N0} 单上架，单价 {3:N0}", "{0}: {1:N0}개를 {2:N0}건으로 등록, 개당 {3:N0}");
 
-    internal static string AutoRestockPriceLabel(AutoRestockPriceKind kind) => kind switch
+    internal static string AutoRestockPriceLabel(AutoRestockPriceKind kind, System.TimeSpan age = default) => kind switch
     {
         AutoRestockPriceKind.Listing => T("current listing", "現在の出品", "aktuelles Angebot", "offre actuelle", "当前挂单", "현재 매물"),
-        AutoRestockPriceKind.Market => T("market scan", "相場情報", "Marktabfrage", "relevé du marché", "行情扫描", "시세 조회"),
+        AutoRestockPriceKind.LiveMarket => T("live market", "最新相場", "Live-Markt", "marché en direct", "实时市场", "실시간 시세"),
+        AutoRestockPriceKind.Cache => age.TotalHours >= 1
+            ? string.Format(T("cache {0}h old", "{0} 時間前のキャッシュ", "Cache ({0} Std. alt)", "cache de {0} h", "{0} 小时前的缓存", "{0}시간 전 캐시"), (int)age.TotalHours)
+            : string.Format(T("cache {0}m old", "{0} 分前のキャッシュ", "Cache ({0} Min. alt)", "cache de {0} min", "{0} 分钟前的缓存", "{0}분 전 캐시"), (int)age.TotalMinutes),
         AutoRestockPriceKind.LastSale => T("last sale", "前回の販売", "letzter Verkauf", "dernière vente", "最近成交", "최근 판매"),
+        AutoRestockPriceKind.Manual => RunManualPrice,
         AutoRestockPriceKind.UnknownListingPrice => T("current listing price unavailable", "現在の出品価格が不明", "aktueller Angebotspreis unbekannt", "prix de l’offre actuelle inconnu", "无法读取当前挂单价格", "현재 매물 가격을 알 수 없음"),
-        AutoRestockPriceKind.NoMarketOrSale => T("no fresh same-quality market price or recorded sale price", "同品質の新しい相場や販売価格の記録がない", "kein aktueller Markt- oder Verkaufspreis derselben Qualität", "aucun prix récent du marché ou de vente pour cette qualité", "没有同品质的近期行情或成交价", "같은 품질의 최신 시세나 판매 가격이 없음"),
+        AutoRestockPriceKind.NoMarketOrSale => T("no eligible market price or recorded sale price", "対象の相場や販売価格の記録なし", "kein passender Markt- oder Verkaufspreis", "aucun prix de marché ou de vente applicable", "没有适用的行情或成交价", "적용 가능한 시세 또는 판매가 없음"),
         _ => T("price or floor outside the supported range", "価格または最低価格が範囲外", "Preis oder Mindestpreis außerhalb des gültigen Bereichs", "prix ou plancher hors limites", "价格或底价超出范围", "가격 또는 최저가가 허용 범위를 벗어남"),
     };
+
+    internal static string RestockSkipLabel(RestockSkipReason reason) => reason switch
+    {
+        RestockSkipReason.Unconfirmed => T("listing unconfirmed when the run stopped", "停止時に出品未確認", "Angebot beim Stopp unbestätigt", "annonce non confirmée à l’arrêt", "停止时挂单尚未确认", "중단 시 등록 미확인"),
+        RestockSkipReason.NoStock => StockNoInventory,
+        RestockSkipReason.NoSlot => StockNoMarketSlot,
+        RestockSkipReason.PreferredRetainerFull => T("preferred retainer’s market is full", "優先リテイナーの出品枠が満杯", "Markt des bevorzugten Gehilfen voll", "marché du servant préféré plein", "首选雇员的挂单栏已满", "선호 집사의 판매 칸이 가득 참"),
+        RestockSkipReason.SourceRetainerFull => T("no free market slot on the retainer holding the stock", "在庫を持つリテイナーに空き出品枠なし", "kein freier Platz beim Gehilfen mit dem Bestand", "aucune place libre chez le servant qui détient le stock", "持有库存的雇员没有空余挂单栏位", "재고를 보유한 집사에게 빈 판매 칸 없음"),
+        RestockSkipReason.SourceUnavailable => T("source stack unavailable", "出品元のスタックが見つからない", "Quellstapel nicht verfügbar", "pile source indisponible", "来源堆叠不可用", "출처 묶음을 사용할 수 없음"),
+        RestockSkipReason.WriteFailed => T("could not submit the listing", "出品を送信できない", "Angebot konnte nicht gesendet werden", "impossible d’envoyer l’annonce", "无法提交挂单", "판매 등록을 제출할 수 없음"),
+        RestockSkipReason.TimedOut => T("timed out waiting for listing confirmation", "出品の確認がタイムアウト", "Zeitlimit für Angebotsbestätigung erreicht", "délai de confirmation de l’annonce dépassé", "等待挂单确认超时", "판매 등록 확인 시간 초과"),
+        _ => T("sale list, retainer or restock settings changed", "出品リスト、リテイナー、または補充設定が変更された", "Verkaufsliste, Gehilfe oder Auffülleinstellungen geändert", "liste de vente, servant ou réglages de réassort modifiés", "出售列表、雇员或补货设置已更改", "판매 목록, 집사 또는 보충 설정이 변경됨"),
+    };
+
+    internal static string RestockListingFailed => T("{0}: skipped {1} ×{2:N0} ({3})", "{0}：{1} ×{2:N0} をスキップ（{3}）", "{0}: {1} ×{2:N0} übersprungen ({3})", "{0} : {1} ×{2:N0} ignoré ({3})", "{0}：已跳过 {1} ×{2:N0}（{3}）", "{0}: {1} ×{2:N0} 건너뜀 ({3})");
+    internal static string StockNoInventory => T("no listable units in retainer inventories, bags or saddlebags", "リテイナー、所持品、チョコボかばんに出品可能な在庫なし", "kein verkaufbarer Bestand bei Gehilfen, in Taschen oder Satteltaschen", "aucun stock vendable chez les servants, dans les sacs ou les sacoches", "雇员背包、角色背包和鞍囊中均无可上架库存", "집사 보관함, 가방, 안장에 판매 가능한 수량 없음");
+    internal static string StockNothingToList => T("{0}: nothing to list ({1})", "{0}：出品なし（{1}）", "{0}: nichts anzubieten ({1})", "{0} : rien à mettre en vente ({1})", "{0}：没有可上架物品（{1}）", "{0}: 등록할 수량 없음 ({1})");
+    internal static string StockMarketPricing => T("Price at listing", "出品時に価格決定", "Preis beim Anbieten", "Prix à la mise en vente", "上架时定价", "등록 시 가격 결정");
+    internal static string StockAutomaticPricing => T("Uses a recent cached unit price or compares live prices at the bell. The last recorded sale is the fallback.", "新しいキャッシュの単価を使うか、呼び鈴で最新相場を確認します。取得できない場合は前回の販売価格を使います。", "Nutzt einen aktuellen Stückpreis aus dem Cache oder vergleicht Live-Preise an der Klingel. Als Ersatz dient der letzte erfasste Verkauf.", "Utilise un prix unitaire récent en cache ou compare les prix en direct à la sonnette. À défaut, utilise la dernière vente enregistrée.", "使用近期缓存单价或在传唤铃处比较实时价格。最后回退到最近一次记录的成交价。", "최근 캐시 단가를 사용하거나 초인종에서 실시간 가격을 비교합니다. 마지막으로 기록된 판매가를 대체값으로 사용합니다.");
+    internal static string StockUnitPriceHint => T("Unit price in gil. Defaults to your current listing or the market price, with the floor applied.", "ギルでの単価。既定値は現在の出品価格または相場に最低価格を適用したものです。", "Stückpreis in Gil. Standard ist der aktuelle Angebotspreis oder Marktpreis mit Mindestpreis.", "Prix unitaire en gils. Par défaut, utilise votre annonce actuelle ou le prix du marché en appliquant le plancher.", "以金币计的单价。默认采用当前挂单价或市场价，并应用最低价。", "길 단위의 개당 가격입니다. 기본값은 현재 매물가 또는 시장가에 최저가를 적용한 값입니다.");
+    internal static string StockMarketPriceHint => T("Market unit price minus {0:N0} gil, subject to the floor. Scanned {1:N0} min ago.", "相場の単価から {0:N0} ギルを引いた価格（最低価格を適用）。{1:N0} 分前に取得。", "Marktpreis je Stück minus {0:N0} Gil, mit Mindestpreis. Vor {1:N0} Min. abgefragt.", "Prix unitaire du marché moins {0:N0} gils, avec application du plancher. Relevé il y a {1:N0} min.", "市场单价减去 {0:N0} 金币，并应用最低价。扫描于 {1:N0} 分钟前。", "시장 단가에서 {0:N0}길을 빼고 최저가를 적용합니다. {1:N0}분 전에 조회했습니다.");
+    internal static string StockMarketCheckHint => T("Use List & price to compare prices for an item with no current listing.", "出品中のないアイテムの相場は「出品・価格設定」で確認できます。", "Für Artikel ohne aktuelles Angebot über „Anbieten“ Preise vergleichen.", "Utilisez « Mettre en vente » pour comparer les prix d’un objet sans annonce active.", "对于当前没有挂单的物品，请使用“上架并定价”比较价格。", "현재 매물이 없는 아이템의 가격은 ‘등록 및 가격 설정’에서 비교합니다.");
+    internal static string StockOnlyLow => T("Only low", "在庫不足のみ", "Nur niedriger Bestand", "Stock bas uniquement", "仅低库存", "재고 부족만");
+    internal static string StockProvisional => T("Includes listings whose removal has yet to be confirmed.", "消失が未確認の出品を含みます。", "Enthält Angebote, deren Entfernung noch nicht bestätigt ist.", "Inclut les annonces dont le retrait reste à confirmer.", "包含尚未确认已移除的挂单。", "제거가 아직 확인되지 않은 매물을 포함합니다.");
+    internal static string GilPerUnit => T("gil/unit", "ギル/個", "Gil/Stk.", "gils/unité", "金币/件", "길/개");
 
     // Fork: sale history capture and display.
     public static string FetchSaleHistory => T("Read sale history when visiting retainers", "リテイナー巡回時に販売履歴を取得", "Verkaufsverlauf bei Gehilfenbesuchen abrufen", "Lire l’historique des ventes lors des visites aux servants", "访问雇员时读取出售记录", "집사 방문 시 판매 내역 조회");
@@ -152,13 +180,14 @@ public static class Strings
     public static string ProfitEarningTotals => T("Profit: {0} · Earning (no cost): {1}", "利益: {0} · 原価不明の収益: {1}", "Gewinn: {0} · Erlös ohne Kosten: {1}", "Bénéfice : {0} · Recettes sans coût : {1}", "利润：{0} · 无成本收入：{1}", "이익: {0} · 원가 미기록 수익: {1}");
     public static string EarningTooltip => T("Earning — no purchase cost recorded (gathered / unknown)", "収益 — 購入原価の記録なし（採集・不明）", "Erlös — keine Einkaufskosten erfasst (gesammelt / unbekannt)", "Recettes — aucun coût d’achat enregistré (récolté / inconnu)", "收入 — 未记录购入成本（采集／未知）", "수익 — 구입 원가 미기록 (채집 / 미상)");
     public static string SalesProfitIncomplete => T("({0:N0} sales with missing proceeds)", "（売上不明 {0:N0} 件）", "({0:N0} Verkäufe ohne Erlösangabe)", "({0:N0} ventes avec recettes inconnues)", "（{0:N0} 笔交易收入未知）", "(판매 대금 미상 {0:N0}건)");
-    public static string TodayMarketSales => T("Today: {0:N0} sales (ours {1:N0}) · lost {2:N0}", "今日: {0:N0} 件（自分 {1:N0}） · 他者 {2:N0}", "Heute: {0:N0} Verkäufe (eigene {1:N0}) · verloren {2:N0}", "Aujourd’hui : {0:N0} ventes (nous : {1:N0}) · perdues : {2:N0}", "今日：{0:N0} 笔（我方 {1:N0}）· 流失 {2:N0}", "오늘: 판매 {0:N0}건 (내 판매 {1:N0}건) · 놓친 판매 {2:N0}건");
+    public static string TodayMarketSales => T("Today: {0:N0} sales (ours {1:N0}) · unmatched {2:N0}", "今日: {0:N0} 件（自分 {1:N0}） · 未照合 {2:N0}", "Heute: {0:N0} Verkäufe (eigene {1:N0}) · nicht zugeordnet {2:N0}", "Aujourd’hui : {0:N0} ventes (nous : {1:N0}) · non rapprochées {2:N0}", "今日：{0:N0} 笔（我方 {1:N0}）· 未匹配 {2:N0}", "오늘: 판매 {0:N0}건 (내 판매 {1:N0}건) · 미일치 {2:N0}건");
     public static string TodayOwnSales => T("Today: {0:N0} own sales · market history unavailable", "今日: 自分の販売 {0:N0} 件 · 市場履歴なし", "Heute: {0:N0} eigene Verkäufe · kein Marktverlauf", "Aujourd’hui : {0:N0} ventes à nous · historique du marché indisponible", "今日：我方 {0:N0} 笔 · 无市场记录", "오늘: 내 판매 {0:N0}건 · 시장 내역 없음");
     public static string TodayMarketScope => T("(recent history for {0:N0} items)", "（{0:N0} 品目の直近履歴）", "(jüngster Verlauf für {0:N0} Artikel)", "(historique récent de {0:N0} articles)", "（{0:N0} 种物品的近期记录）", "(아이템 {0:N0}종의 최근 내역)");
     public static string TodayRecordedOurs => T("Own sales recorded today: {0:N0}", "今日記録された自分の販売: {0:N0} 件", "Heute erfasste eigene Verkäufe: {0:N0}", "Nos ventes enregistrées aujourd’hui : {0:N0}", "今日已记录的我方成交：{0:N0}", "오늘 기록된 내 판매: {0:N0}건");
     public static string ItemMarketScope => T("Recent market history as of {0:t} · own sales recorded today: {1:N0}", "{0:t} 時点の直近履歴 · 自分の販売記録: {1:N0} 件", "Jüngster Verlauf um {0:t} · heute erfasste eigene Verkäufe: {1:N0}", "Historique récent à {0:t} · nos ventes enregistrées aujourd’hui : {1:N0}", "截至 {0:t} 的近期记录 · 今日我方记录：{1:N0} 笔", "{0:t} 기준 최근 내역 · 오늘 기록된 내 판매: {1:N0}건");
     public static string LostSaleRow => T("{0:t} · {1:N0}× · {2:N0} gil each · {3}", "{0:t} · {1:N0} 個 · 単価 {2:N0} ギル · {3}", "{0:t} · {1:N0}× · je {2:N0} Gil · {3}", "{0:t} · {1:N0}× · {2:N0} gils l’unité · {3}", "{0:t} · {1:N0} 件 · 单价 {2:N0} 金币 · {3}", "{0:t} · {1:N0}개 · 개당 {2:N0}길 · {3}");
-    public static string LostSalesLog => T("Latest lost sales", "直近の他者の販売", "Letzte verlorene Verkäufe", "Dernières ventes perdues", "最近流失的成交", "최근 놓친 판매");
+    public static string UnmatchedMarketSales => T("Unmatched market sales", "未照合の市場取引", "Nicht zugeordnete Marktverkäufe", "Ventes du marché non rapprochées", "未匹配的市场成交", "일치하지 않는 시장 판매");
+    public static string UnmatchedMarketSalesHint => T("Covers only the market history returned by the game, about the last 20 sales per scanned item.", "ゲームから取得した市場履歴のみ（調査したアイテムごとに直近約20件）。", "Erfasst nur den vom Spiel gelieferten Marktverlauf, etwa die letzten 20 Verkäufe je abgefragtem Artikel.", "Couvre uniquement l’historique renvoyé par le jeu, soit environ les 20 dernières ventes par objet consulté.", "仅涵盖游戏返回的市场记录，每种已扫描物品最近约 20 笔成交。", "게임에서 반환한 시장 내역만 포함합니다. 조회한 아이템마다 최근 판매 약 20건입니다.");
     public static string QualityHq => "HQ";
     public static string QualityNq => "NQ";
     public static string SalesProfitDetails => T("Recorded cost  {0:N2}\nUnits with unknown cost  {1:N0}", "記録原価  {0:N2}\n原価不明の個数  {1:N0}", "Erfasste Kosten  {0:N2}\nStück ohne bekannte Kosten  {1:N0}", "Coût enregistré  {0:N2}\nUnités au coût inconnu  {1:N0}", "已记录成本  {0:N2}\n成本未知的数量  {1:N0}", "기록된 원가  {0:N2}\n원가 미상 수량  {1:N0}");
@@ -186,6 +215,115 @@ public static class Strings
     public static string SuggestedThreshold => T("Suggested threshold  {0:N0} (one day of sales at the 7-day rate)", "推奨しきい値  {0:N0}（直近7日の1日平均販売数）", "Vorgeschlagener Grenzwert  {0:N0} (ein Verkaufstag im 7-Tage-Schnitt)", "Seuil suggéré  {0:N0} (un jour de ventes au rythme des 7 derniers jours)", "建议阈值  {0:N0}（近7天的日均销量）", "추천 기준  {0:N0} (최근 7일 기준 하루 판매량)");
 
     public static string WindowTitle => "Restocky";
+    internal static string StockNothingToRestock => "Nothing to restock";
+    internal static string StockMaxAgeSetting => "Stock tracking max age (hours)";
+    internal static string StockSources => "Stock by source";
+    internal static string StockFreshCounts => "Totals include sources read this session within the stock tracking max age.";
+    internal static string StockBag => "Bag";
+    internal static string StockSaddlebag => "Saddlebag";
+    internal static string StockPremiumSaddlebag => "Premium saddlebag";
+    internal static string StockRetainerInventory => "{0} inventory";
+    internal static string StockRetainerListed => "{0} listed";
+    internal static string StockSourceCount => "{0} {1} ({2})";
+    internal static string StockNeverRead => "never read";
+    internal static string StockPreviousSession => "not read this session";
+    internal static string StockIncompleteRead => "partial read, {0}";
+    internal static string StockStaleRead => "stale, {0}";
+    internal static string StockReadNow => "now";
+    internal static string StockReadMinutes => "{0:N0} min ago";
+    internal static string StockReadHours => "{0:N0} h ago";
+    internal static string StockReadDays => "{0:N0} d ago";
+    internal static string StockNextCycle => "Next cycle";
+    internal static string StockRestockModeLabel => "Restock";
+    internal static string StockRestockModeName(StockRestockMode mode) => mode switch
+    {
+        StockRestockMode.Auto => "Auto",
+        StockRestockMode.Alert => "Alert",
+        _ => "Default",
+    };
+    internal static string StockAlertOnly => "Alert only";
+    internal static string StockCycleDisabled => "Skip: auto-restock is off";
+    internal static string StockCycleHeld => "Skip: item is on hold";
+    internal static string StockCycleListingsUnavailable => "Preview unavailable until all retainer listings have been read.";
+    internal static string StockCycleEnoughListed => "Skip: enough units listed";
+    internal static string StockCycleSkip => "Skip: {0}";
+    internal static string StockCycleListing => "{0} {1:N0} @ {2:N0} ({3})";
+    internal static string StockCycleCompare => "{0} {1:N0} (compare live market)";
+    internal static string StockCycleFallback => "If the comparison fails: {0:N0} ({1})";
+    internal static string StockCycleSnapshot => "Based on the last snapshots. The cycle refreshes retainer listings before planning.";
+    internal static string StockOpenBell => "Open the summoning bell first";
+    internal static string StockRunInProgress => "A run is in progress";
+    internal static string StockRestockHint => "List up to {0:N0} units at the price on this row.";
+    internal static string ColWhy => "Why";
+    internal static string TabRuns => "Runs";
+    internal static string RunCopy => "Copy";
+    internal static string RunNone => "No runs recorded yet.";
+    internal static string RunGeneral => "General";
+    internal static string RunCompleted => "Completed";
+    internal static string RunNoRetainers => "No retainers in the bell list";
+    internal static string RunPluginUnloaded => "Plugin unloaded";
+    internal static string RunStopReason => "End reason — {0}";
+    internal static string RunTimeRange => "{0} · {1:g} → {2:g}";
+    internal static string RunCounts => "{0} repriced · {1} kept · {2} held · {3} restocked · {4} top-ups · {5} proposed · {6} to review";
+    internal static string RunRepricedItem => "{0} — {1:N0} → {2:N0} ({3})";
+    internal static string RunListingDecision => "{0} #{1} — {2}";
+    internal static string RunRepriceError => "Reprice or market read failed";
+    internal static string RunRepricePriceRejected => "Price below the floor or outside the supported range";
+    internal static string RunRepriceSlotChanged => "Listing slot or current price could not be verified";
+    internal static string RunRepriceUnconfirmed => "Price change could not be confirmed";
+    internal static string RunRestockComparisonFailed => "{0} — market comparison failed ({1})";
+    internal static string RunRestockSaleEntryMissing => "Put up for sale entry unavailable";
+    internal static string RunRestockSaleWindowMismatch => "Sale window item, quality or retainer mismatch";
+    internal static string RunRestockSaleWindowMissing => "Sale window unavailable";
+    internal static string RunMarketSearchTimeout => "Market search timed out";
+    internal static string RunTopUpDone => "Topped up {0} {1:N0} → {2:N0} @ {3:N0}";
+    internal static string RunUnknownRetainer => "Retainer no longer in the snapshot";
+    internal static string RunManualPrice => "price on Stock tracking";
+    internal static string RunWarning => "(!)";
+    internal static string RunModeLabel(RunMode mode) => mode switch
+    {
+        RunMode.Full => "Full",
+        RunMode.Auto => "Auto",
+        RunMode.AutoRetainer => "AR handoff",
+        RunMode.Restock => StockRestock,
+        _ => "Full (price proposals)",
+    };
+    internal static string DecisionFloor => "Floor hit ({0:N0} gil)";
+    internal static string DecisionBait => "Bait skipped — {0} {1:N0}× @ {2:N0}";
+    internal static string DecisionNone => "No price decision yet";
+    internal static string DecisionPool(bool matchQuality, bool hq)
+        => matchQuality ? hq ? "Match quality pool — HQ" : "Match quality pool — NQ" : "Match quality pool — HQ + NQ";
+
+    internal static string DecisionScanAge(System.TimeSpan? age) => age switch
+    {
+        null => "No successful scan",
+        { TotalMinutes: < 1 } => "Last scan just now",
+        { TotalHours: < 1 } a => $"Last scan {(int)a.TotalMinutes:N0} min ago",
+        { TotalDays: < 1 } a => $"Last scan {(int)a.TotalHours:N0} hr ago",
+        { } a => $"Last scan {(int)a.TotalDays:N0} days ago",
+    };
+
+    internal static string PriceDecisionLabel(RepriceDecision decision) => decision.Reason switch
+    {
+        RepriceReason.Held => "Held",
+        RepriceReason.NoData => "Kept — no data (timeout)",
+        RepriceReason.NoCompetitor => "Kept — no competitor",
+        RepriceReason.Error => "Kept — no usable market data",
+        RepriceReason.MaxDrop or RepriceReason.MaxRaise => decision.Apply
+            ? $"{RepriceRules.ReasonCode(decision.Reason)} review (proposed {decision.NewPrice:N0})"
+            : $"{RepriceRules.ReasonCode(decision.Reason)} blocked (would be {decision.NewPrice:N0})",
+        RepriceReason.NoChange when decision.NewPrice != decision.LowestCompetitor => "Kept — already at target",
+        RepriceReason.Floor => string.Format(DecisionFloor, decision.NewPrice),
+        RepriceReason.Manual => $"Manual price {decision.NewPrice:N0}",
+        _ when decision.NewPrice == decision.LowestCompetitor => $"Matched at {decision.NewPrice:N0}",
+        _ => $"Undercut to {decision.NewPrice:N0}",
+    };
+    internal static string RetainerFallback(string item, string preferred, string selected, System.DateTime? fullAtUtc) => fullAtUtc switch
+    {
+        null => string.Format(PreferredRetainerFallback, item, preferred, selected),
+        var at when at == System.DateTime.MinValue => string.Format("{0} — {1} full ({2}/{2}) -> {3}", item, preferred, Planner.MaxListingSlots, selected),
+        { } at => string.Format("{0} — {1} full ({2}/{2} at {3:HH:mm}) -> {4}", item, preferred, Planner.MaxListingSlots, at.ToLocalTime(), selected),
+    };
 
     // Tabs
     public static string TabReprice => T("Update prices", "価格更新", "Preise anpassen", "Mettre à jour les prix", "更新价格", "가격 갱신");

@@ -69,6 +69,7 @@ public sealed class Plugin : IDalamudPlugin
         Strings.SetLanguage(Configuration.ResolveLanguage(ClientState.ClientLanguage));
 
         MarketWatcher = new MarketWatcher(MarketBoard, ObjectTable, Log);
+        MarketWatcher.Cache.RestorePrices(Configuration.RestockMarketPrices ?? []);
         Undercuts = new UndercutHistoryHost(MarketWatcher, Configuration, Framework, PlayerState, ObjectTable, Log,
             PluginInterface.GetPluginConfigDirectory());
         Costs = new CostLedgerHost(MarketBoard, Framework, Log, PluginInterface.GetPluginConfigDirectory());
@@ -79,12 +80,16 @@ public sealed class Plugin : IDalamudPlugin
         MarketWatcher.CompetitorsObserved += (item, scan) =>
         {
             var now = DateTime.UtcNow;
-            Tracker.Tracker.ObserveCompetitors(item, false, scan.Competitors(false, Configuration.MatchQuality.For(item, false)), now);
-            Tracker.Tracker.ObserveCompetitors(item, true, scan.Competitors(true, Configuration.MatchQuality.For(item, true)), now);
+            var retainers = Configuration.Snapshots.Values.Where(s => s.CharacterContentId == PlayerState.ContentId)
+                .Select(s => s.Key).ToHashSet();
+            Tracker.Tracker.ObserveCompetitors(item, false, scan.Competitors(false, Configuration.MatchQuality.For(item, false)), now, retainers);
+            Tracker.Tracker.ObserveCompetitors(item, true, scan.Competitors(true, Configuration.MatchQuality.For(item, true)), now, retainers);
         };
         Executor = new Executor(Framework, Log, Configuration, Costs.Ledger, MarketWatcher.Cache);
         Executor.History = new PriceHistoryLog(
             System.IO.Path.Combine(PluginInterface.GetPluginConfigDirectory(), "price-history.csv"));
+        Executor.RunHistory = new RunReportHistory(
+            System.IO.Path.Combine(PluginInterface.GetPluginConfigDirectory(), "runs.json"), message => Log.Warning(message));
 
         ArDetector = new AutoRetainerDetector(PluginInterface, NotificationManager, Log);
         var arIpc = new AutoRetainerIpc(PluginInterface, Log, () => ArDetector.IsAutoRetainerLoaded());
@@ -163,6 +168,12 @@ public sealed class Plugin : IDalamudPlugin
         WindowSystem.RemoveAllWindows();
         LowStock.Dispose();
         MarketWatcher.Dispose();
+        try
+        {
+            Configuration.RestockMarketPrices = MarketWatcher.Cache.SavedPrices();
+            Configuration.Save();
+        }
+        catch (Exception ex) { Log.Warning(ex, "[Restocker] could not save cached market prices"); }
         SaleHistory.Dispose();
         Undercuts.Dispose();
         Costs.Dispose();

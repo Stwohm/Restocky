@@ -86,6 +86,20 @@ public class RepriceRulesTests
         Assert.Equal(75_000, d.LowestCompetitor);
     }
 
+    [Theory]
+    [InlineData(100, RepriceReason.NoChange)]
+    [InlineData(1000, RepriceReason.MaxDrop)]
+    [InlineData(10, RepriceReason.MaxRaise)]
+    public void Floor_value_survives_when_a_clamped_price_is_not_applied(long current, RepriceReason reason)
+    {
+        var decision = RepriceRules.Decide(current, [90], 100, Default);
+
+        Assert.False(decision.Apply);
+        Assert.Equal(reason, decision.Reason);
+        Assert.Equal(100, decision.NewPrice);
+        Assert.Equal(100, decision.ClampedFloor);
+    }
+
     [Fact]
     public void Planner_applies_the_fifo_floor_for_each_quality_and_records_floor_reason()
     {
@@ -433,7 +447,7 @@ public class RepriceRulesTests
         string? competitor = null;
         var plan = AutoRepricePlanner.Plan("key", "Retainer", [new(0, 1, hq, 1, 1050)],
             (_, quality) => scan.Competitors(quality, match), (_, _) => 0, Default, DateTime.UtcNow,
-            onDecision: (_, decision, offers) =>
+            onDecision: (_, decision, offers, _) =>
                 competitor = MarketOfferFormat.RepriceCompetitor(offers, match, decision.LowestCompetitor));
         var action = Assert.Single(plan.Actions);
         Assert.Equal(target, action.UnitPrice);

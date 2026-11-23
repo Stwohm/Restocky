@@ -17,6 +17,7 @@ public sealed class MainWindow : Window, IDisposable
     private readonly RepriceTab repriceTab;
     private readonly ListTab listTab;
     private readonly SalesTab salesTab = new();
+    private readonly RunsTab runsTab = new();
     private readonly CostsTab costsTab;
     private LowStockTab? lowStockTab;
     private readonly MarketCache marketCache;
@@ -75,6 +76,11 @@ public sealed class MainWindow : Window, IDisposable
             if (ImGui.BeginTabItem("Sales"))
             {
                 salesTab.Draw();
+                ImGui.EndTabItem();
+            }
+            if (executor.RunHistory is { } history && ImGui.BeginTabItem(Strings.TabRuns))
+            {
+                runsTab.Draw(history);
                 ImGui.EndTabItem();
             }
             // Fork: manage purchase and manual cost lots.
@@ -343,6 +349,14 @@ public sealed class MainWindow : Window, IDisposable
         if (ImGui.InputInt(Strings.AutoRestockScanAgeSetting, ref maxScanAge))
         {
             configuration.AutoRestockMaxScanAgeHours = Math.Max(0, maxScanAge);
+            configuration.Save();
+        }
+
+        var stockMaxAge = configuration.StockMaxAgeHours;
+        ImGui.SetNextItemWidth(120);
+        if (ImGui.InputInt(Strings.StockMaxAgeSetting, ref stockMaxAge))
+        {
+            configuration.StockMaxAgeHours = Math.Max(1, stockMaxAge);
             configuration.Save();
         }
 

@@ -109,6 +109,11 @@ public sealed class ConfirmDialog
                     ImGui.Bullet();
                     ImGui.TextWrapped(string.Format(Strings.TopUpPlan, name, topUp.OriginalQuantity, a.Quantity, a.UnitPrice, retainerName));
                 }
+                else if (a.ResolveRestockPrice)
+                {
+                    ImGui.BulletText($"{name} ×{a.Quantity} · {Strings.StockMarketPricing}");
+                    if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.StockAutomaticPricing);
+                }
                 else
                 {
                     ImGui.BulletText($"{name} ×{a.Quantity} @ {a.UnitPrice:N0} g");
@@ -118,7 +123,7 @@ public sealed class ConfirmDialog
             {
                 var name = sheet.TryGetRow(a.ItemId, out var row) ? row.Name.ExtractText() : $"#{a.ItemId}";
                 if (a.IsHQ) name += " (HQ)";
-                ImGui.TextWrapped(string.Format(Strings.PreferredRetainerFallback, name, a.PreferredRetainerFallback, retainerName));
+                ImGui.TextWrapped(Strings.RetainerFallback(name, a.PreferredRetainerFallback!, retainerName, a.PreferredRetainerFullAtUtc));
             }
             ImGui.Unindent();
         }
