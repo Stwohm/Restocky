@@ -101,6 +101,8 @@ public class RestockPlannerTests
         var need = Assert.Single(needs);
         Assert.Equal((Twine, false), need.Key);
         Assert.Equal(9, need.Value);
+        var manual = RestockPlanner.SaddleStagingNeeds([Listing("char.1.bag", 2), Listing("char.1.saddle", 3)]);
+        Assert.Equal(3, Assert.Single(manual).Value);
     }
 
     [Fact]

@@ -16,10 +16,14 @@ internal static class AutoRestockPlanner
     internal static List<AutoRestockPlan> Plan(
         IEnumerable<LowStockEntry> entries, IReadOnlyCollection<RetainerSnapshot> retainers, CharacterSnapshot? character,
         ListingTracker tracker, MarketCache? marketCache, DateTime nowUtc, int maxScanAgeHours, int undercutGil,
-        Func<uint, bool, bool> isHeld, Func<uint, bool, long> floorFor)
+        Func<uint, bool, bool> isHeld, Func<uint, bool, long> floorFor,
+        IReadOnlyDictionary<string, RetainerSnapshot>? knownRetainers = null)
     {
         var plans = new List<AutoRestockPlan>();
         var keys = retainers.Select(r => r.Key).ToHashSet();
+        var owner = retainers.FirstOrDefault();
+        if (owner == null) return plans;
+        var characterPrefix = $"{owner.CharacterContentId:X}.";
         var free = retainers.ToDictionary(r => r.Key, r => Math.Max(0, Planner.MaxListingSlots - r.Listings.Count));
         var listings = retainers.SelectMany(r => r.Listings).ToLookup(l => (l.ItemId, l.IsHQ));
         foreach (var entry in entries.DistinctBy(e => (e.ItemId, e.IsHq)))
@@ -33,8 +37,12 @@ internal static class AutoRestockPlanner
             if (listedUnits > entry.Threshold || listedUnits >= entry.Target) continue;
 
             var floor = floorFor(itemId, hq);
-            var (price, kind) = ResolvePrice(existing, marketCache?.GetScan(itemId), nowUtc, maxScanAgeHours, undercutGil,
-                hq, floor, () => tracker.GetSales(itemId, hq).FirstOrDefault());
+            var scan = marketCache?.GetScan(itemId);
+            var (price, kind) = ResolvePrice(existing, scan?.Scan.WorldId == owner.WorldId ? scan : null,
+                nowUtc, maxScanAgeHours, undercutGil, hq, floor, () => tracker.GetSales(itemId, hq).FirstOrDefault(s =>
+                    keys.Contains(s.RetainerKey) || s.RetainerKey.StartsWith(characterPrefix, StringComparison.Ordinal)
+                    || (knownRetainers != null && knownRetainers.TryGetValue(s.RetainerKey, out var seller)
+                        && seller.WorldId != 0 && seller.WorldId == owner.WorldId)));
             if (price == 0)
             {
                 plans.Add(new AutoRestockPlan(itemId, hq, kind, new()));
@@ -105,7 +113,9 @@ internal static class AutoRestockPlanner
         // History-only records have net proceeds. Use the smallest gross unit price
         // consistent with those proceeds at the tracker's sale tax rate.
         var unitPrice = decimal.Ceiling(sale.SoldTotalGil / (ListingTracker.SaleNetRate * sale.Quantity));
-        return (long)Math.Min(unitPrice, (long)uint.MaxValue + 1);
+        if (unitPrice > uint.MaxValue) return (long)uint.MaxValue + 1;
+        var price = (long)unitPrice;
+        return ListingTracker.NetFromGross(price * sale.Quantity) == sale.SoldTotalGil ? price : 0;
     }
 
     internal static bool IsValidPrice(long price, long floor) => price is > 0 and <= uint.MaxValue && price >= floor;

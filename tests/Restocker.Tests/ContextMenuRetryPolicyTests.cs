@@ -27,17 +27,18 @@ public class ContextMenuRetryPolicyTests
     }
 
     [Fact]
-    public void Third_consecutive_failed_row_stops_the_run()
+    public void Consecutive_failed_rows_each_skip_and_leave_the_next_row_runnable()
     {
         var policy = new ContextMenuRetryPolicy();
 
         Assert.Equal(ContextMenuRetryDecision.Skip, ExhaustRetries(policy));
         Assert.Equal(ContextMenuRetryDecision.Skip, ExhaustRetries(policy));
-        Assert.Equal(ContextMenuRetryDecision.Stop, ExhaustRetries(policy));
+        Assert.Equal(ContextMenuRetryDecision.Skip, ExhaustRetries(policy));
+        Assert.Equal(ContextMenuRetryDecision.Retry, policy.OnEntryMissing());
     }
 
     [Fact]
-    public void Success_between_failed_rows_breaks_the_failure_streak()
+    public void Success_between_failed_rows_starts_a_fresh_retry_budget()
     {
         var policy = new ContextMenuRetryPolicy();
         Assert.Equal(ContextMenuRetryDecision.Skip, ExhaustRetries(policy));
@@ -47,7 +48,7 @@ public class ContextMenuRetryPolicyTests
 
         Assert.Equal(ContextMenuRetryDecision.Skip, ExhaustRetries(policy));
         Assert.Equal(ContextMenuRetryDecision.Skip, ExhaustRetries(policy));
-        Assert.Equal(ContextMenuRetryDecision.Stop, ExhaustRetries(policy));
+        Assert.Equal(ContextMenuRetryDecision.Skip, ExhaustRetries(policy));
     }
 
     private static ContextMenuRetryDecision ExhaustRetries(ContextMenuRetryPolicy policy)

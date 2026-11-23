@@ -8,6 +8,17 @@ public sealed class DailyMarketSalesTests
     private static readonly MarketSale Sale = new(8, true, 2, 100, Noon);
 
     [Fact]
+    public void Identical_sale_to_a_different_known_buyer_is_lost()
+    {
+        var own = Own(Noon);
+        own.BuyerName = "Buyer A";
+        var other = Sale with { BuyerName = "Buyer B" };
+        var daily = DailyMarketSales.Calculate([other], [own], Noon, TimeZoneInfo.Utc);
+        Assert.Equal(0, daily.Matched);
+        Assert.Equal(other, Assert.Single(daily.Lost));
+    }
+
+    [Fact]
     public void RequiresSameItemQualityQuantityAndPriceWithinFiveMinutes()
     {
         var lost = new[]

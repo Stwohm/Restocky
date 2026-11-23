@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using Dalamud.Game.Network.Structures;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
@@ -17,6 +18,8 @@ public sealed unsafe class MarketWatcher : IDisposable
     private readonly IMarketBoard marketBoard;
     private readonly IObjectTable objectTable;
     private readonly IPluginLog log;
+    private int requestGeneration;
+    private volatile bool disposed;
     public MarketCache Cache { get; } = new();
     private readonly ConcurrentDictionary<(uint WorldId, uint ItemId), MarketSaleScan> saleHistory = new();
 
@@ -46,11 +49,13 @@ public sealed unsafe class MarketWatcher : IDisposable
     {
         expectedItemId = itemId;
         expectedIsHq = isHq;
+        Interlocked.Increment(ref requestGeneration);
     }
 
     public void ClearExpectedItem()
     {
         expectedItemId = null;
+        Interlocked.Increment(ref requestGeneration);
     }
 
     public MarketWatcher(IMarketBoard marketBoard, IObjectTable objectTable, IPluginLog log)
@@ -64,11 +69,24 @@ public sealed unsafe class MarketWatcher : IDisposable
 
     public void Dispose()
     {
+        disposed = true;
         marketBoard.OfferingsReceived -= OnOfferingsReceived;
         marketBoard.HistoryReceived -= OnHistoryReceived;
     }
 
     private void OnHistoryReceived(IMarketBoardHistory history)
+        => OnFramework(() => RecordHistory(history));
+
+    private void OnFramework(Action record)
+    {
+        var generation = Volatile.Read(ref requestGeneration);
+        _ = Plugin.Framework.RunOnFrameworkThread(() =>
+        {
+            if (!disposed && generation == Volatile.Read(ref requestGeneration)) record();
+        });
+    }
+
+    private void RecordHistory(IMarketBoardHistory history)
     {
         var player = objectTable.LocalPlayer;
         var homeWorld = player?.HomeWorld.RowId ?? 0;
@@ -78,12 +96,15 @@ public sealed unsafe class MarketWatcher : IDisposable
 
         var sales = history.HistoryListings
             .Where(s => s.SalePrice > 0 && s.Quantity is > 0 and <= int.MaxValue)
-            .Select(s => new MarketSale(itemId, s.IsHq, (int)s.Quantity, s.SalePrice, s.PurchaseTime))
+            .Select(s => new MarketSale(itemId, s.IsHq, (int)s.Quantity, s.SalePrice, s.PurchaseTime, s.BuyerName))
             .ToArray();
         saleHistory[(homeWorld, itemId)] = new MarketSaleScan(DateTime.UtcNow, sales);
     }
 
     private void OnOfferingsReceived(IMarketBoardCurrentOfferings offerings)
+        => OnFramework(() => RecordOffers(offerings));
+
+    private void RecordOffers(IMarketBoardCurrentOfferings offerings)
     {
         try
         {
@@ -105,7 +126,7 @@ public sealed unsafe class MarketWatcher : IDisposable
             {
                 if (itemId != 0)
                 {
-                    Cache.Replace(itemId, new MarketScan([], []));
+                    Cache.Replace(itemId, new MarketScan([], []) { WorldId = HomeWorldId });
                     log.Information($"[Restocker] OfferingsReceived item={itemId} empty board -> no competitor");
                 }
                 return;
@@ -150,7 +171,7 @@ public sealed unsafe class MarketWatcher : IDisposable
 
             // Both flags are always written (possibly empty) so "no HQ competitor" is a known
             // answer, not a timeout.
-            var scan = new MarketScan(nqPrices, hqPrices);
+            var scan = new MarketScan(nqPrices, hqPrices) { WorldId = HomeWorldId };
             Cache.Replace(itemId, scan);
             if (expectedItemId.HasValue)
             {

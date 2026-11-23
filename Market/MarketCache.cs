@@ -41,6 +41,7 @@ public static class MarketOfferFormat
 /// <summary>One home-world response. Every pricing view uses offers from the same scan.</summary>
 public sealed class MarketScan
 {
+    internal uint WorldId { get; init; }
     private readonly MarketOffer[] nq;
     private readonly MarketOffer[] hq;
     private readonly MarketOffer[] all;

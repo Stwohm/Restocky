@@ -5,6 +5,14 @@ namespace Restocker.Tests;
 public class BaitMatchOverridesTests
 {
     [Fact]
+    public void Chat_link_ids_identify_item_and_quality_independently_of_registration_order()
+    {
+        Assert.NotEqual(BaitMatchOverrides.LinkId(42, false), BaitMatchOverrides.LinkId(42, true));
+        Assert.NotEqual(BaitMatchOverrides.LinkId(42, true), BaitMatchOverrides.LinkId(43, true));
+        Assert.Equal(0x80000055u, BaitMatchOverrides.LinkId(42, true));
+    }
+
+    [Fact]
     public void Queued_during_cycle_applies_to_unplanned_item_and_stays_active_after_consumption()
     {
         var matches = new BaitMatchOverrides();

@@ -10,6 +10,16 @@ public class AutoRestockPlannerTests
 {
     private const uint Twine = 50970;
     private const uint Other = 50971;
+
+    [Theory]
+    [InlineData(0, 0, false)]
+    [InlineData(-1, 0, false)]
+    [InlineData(99, 100, false)]
+    [InlineData(100, 100, true)]
+    [InlineData(4294967295L, 0, true)]
+    [InlineData(4294967296L, 0, false)]
+    public void Validates_the_final_price_against_the_current_floor_and_api_range(long price, long floor, bool valid)
+        => Assert.Equal(valid, AutoRestockPlanner.IsValidPrice(price, floor));
     private static readonly DateTime Now = new(2026, 11, 23, 12, 0, 0, DateTimeKind.Utc);
 
     [Fact]
@@ -80,7 +90,7 @@ public class AutoRestockPlannerTests
         a.Inventory.Add(Stock(Twine, 1, hq: true));
         var tracker = Tracker(
             Sale(Twine, "A", gross: 1_000, hq: true, when: Now.AddDays(-2)),
-            Sale(Twine, "Former retainer", gross: 2_468, hq: true, quantity: 2, when: Now.AddDays(-1)),
+            Sale(Twine, "1.F", gross: 2_468, hq: true, quantity: 2, when: Now.AddDays(-1)),
             Sale(Twine, "A", gross: 900),
             Sale(Other, "A", gross: 50, hq: true));
 
@@ -145,6 +155,30 @@ public class AutoRestockPlannerTests
     }
 
     [Fact]
+    public void Another_home_worlds_fresh_scan_and_sale_cannot_price_a_restock()
+    {
+        var a = Retainer("1.A");
+        a.WorldId = 2;
+        a.Inventory.Add(Stock(Twine, 1));
+        var tracker = Tracker(Sale(Twine, "2.B", 45), Sale(Twine, "1.F", 500, when: Now.AddDays(-1)));
+        var cache = new MarketCache { Clock = () => Now };
+        cache.Replace(Twine, new MarketScan([new(20, "Other", 1)], []) { WorldId = 1 });
+        var result = Assert.Single(Plan([Watch(Twine)], [a], tracker: tracker, market: cache));
+        Assert.Equal(500, Assert.Single(result.Actions).UnitPrice);
+    }
+
+    [Fact]
+    public void Net_sale_that_cannot_represent_a_whole_gil_unit_price_is_skipped()
+    {
+        var a = Retainer("A");
+        a.Inventory.Add(Stock(Twine, 1));
+        var sale = Sale(Twine, "A", gross: null, quantity: 3);
+        sale.SoldTotalGil = 100;
+        var result = Assert.Single(Plan([Watch(Twine)], [a], tracker: Tracker(sale)));
+        Assert.Empty(result.Actions);
+    }
+
+    [Fact]
     public void Shares_free_slots_across_items()
     {
         var a = Retainer("A", Enumerable.Repeat(Listed(Other, 1, 100), 19).ToArray());
@@ -194,7 +228,7 @@ public class AutoRestockPlannerTests
 
     private static LowStockEntry Watch(uint id, bool hq = false) => new() { ItemId = id, IsHq = hq, Target = 1 };
     private static RetainerSnapshot Retainer(string key, params ListingEntry[] listings)
-        => new() { Key = key, Listings = listings.ToList() };
+        => new() { Key = key, CharacterContentId = 1, Listings = listings.ToList() };
     private static ListingEntry Listed(uint id, int qty, long price, bool hq = false)
         => new() { ItemId = id, IsHQ = hq, Quantity = qty, UnitPrice = price };
     private static InventoryEntry Stock(uint id, int qty, bool hq = false, int max = 99)

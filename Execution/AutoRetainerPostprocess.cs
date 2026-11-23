@@ -10,6 +10,7 @@ internal sealed class AutoRetainerPostprocess
 
     public bool Pending { get; private set; }
     public bool Active => deadline.HasValue;
+    public bool FinishPending { get; private set; }
 
     public bool OnOffer(bool mayRequest)
     {
@@ -34,4 +35,15 @@ internal sealed class AutoRetainerPostprocess
         deadline = null;
         return true;
     }
+
+    // AR's finish signal has no owner argument. Retry only until a new offer/grant.
+    public void Finish(Action signal)
+    {
+        if (!TakeFinish() && !FinishPending) return;
+        FinishPending = true;
+        signal();
+        FinishPending = false;
+    }
+
+    public void ForgetFinish() => FinishPending = false;
 }

@@ -17,6 +17,8 @@ public sealed class AutoRetainerIpc
     private readonly IPluginLog log;
     private readonly Func<bool> isLoaded;
     private bool suppressedByUs;
+    private bool releasePending;
+    private long retryReleaseAt;
     private readonly AutoRetainerPostprocess postprocess = new();
     private readonly ICallGateSubscriber<bool> busy;
     private readonly string pluginName;
@@ -26,6 +28,7 @@ public sealed class AutoRetainerIpc
     private readonly ICallGateSubscriber<object> postprocessFinish;
     private Func<bool>? shouldRequestPostprocess;
     private Func<string, bool>? startPostprocess;
+    private Action? interruptPostprocess;
 
     public AutoRetainerIpc(IDalamudPluginInterface pi, IPluginLog log, Func<bool> isLoaded)
     {
@@ -43,6 +46,7 @@ public sealed class AutoRetainerIpc
     public bool IsLoaded => isLoaded();
 
     internal bool HasPostprocess => postprocess.Active;
+    internal bool ReleasePending => releasePending || postprocess.FinishPending;
     internal bool PostprocessTimedOut => postprocess.TimedOut(Environment.TickCount64);
 
     internal bool PostprocessInterrupted()
@@ -56,10 +60,11 @@ public sealed class AutoRetainerIpc
         }
     }
 
-    internal void ListenForPostprocess(Func<bool> shouldRequest, Func<string, bool> start)
+    internal void ListenForPostprocess(Func<bool> shouldRequest, Func<string, bool> start, Action interrupt)
     {
         shouldRequestPostprocess = shouldRequest;
         startPostprocess = start;
+        interruptPostprocess = interrupt;
         postprocessGrant.Subscribe(OnPostprocessGrant);
         postprocessOffer.Subscribe(OnPostprocessOffer);
     }
@@ -68,10 +73,11 @@ public sealed class AutoRetainerIpc
     {
         shouldRequestPostprocess = null;
         startPostprocess = null;
+        interruptPostprocess = null;
         FinishPostprocess();
         // AR has no withdraw IPC. If it already accepted a request, keep answering until
         // that grant is released or the next offer replaces the old request list.
-        if (!postprocess.Pending) UnsubscribePostprocess();
+        if (!postprocess.Pending || PostprocessInterrupted()) UnsubscribePostprocess();
     }
 
     private void UnsubscribePostprocess()
@@ -84,16 +90,22 @@ public sealed class AutoRetainerIpc
     {
         try
         {
+            SupersedePostprocess();
             if (postprocess.OnOffer(shouldRequestPostprocess?.Invoke() == true))
                 postprocessRequest.InvokeAction(pluginName);
             else if (shouldRequestPostprocess == null)
                 UnsubscribePostprocess();
         }
-        catch (Exception ex) { log.Warning(ex, "[Restocker] AutoRetainer postprocess request failed"); }
+        catch (Exception ex)
+        {
+            postprocess.OnOffer(false);
+            log.Warning(ex, "[Restocker] AutoRetainer postprocess request failed");
+        }
     }
 
     private void OnPostprocessGrant(string owner, string retainerName)
     {
+        if (owner != pluginName) SupersedePostprocess();
         if (!postprocess.OnGrant(owner == pluginName, Environment.TickCount64)) return;
         var started = false;
         try { started = startPostprocess?.Invoke(retainerName) == true; }
@@ -107,9 +119,28 @@ public sealed class AutoRetainerIpc
 
     internal void FinishPostprocess()
     {
-        if (!postprocess.TakeFinish()) return;
-        try { postprocessFinish.InvokeAction(); }
+        try { postprocess.Finish(() => postprocessFinish.InvokeAction()); }
         catch (Exception ex) { log.Warning(ex, "[Restocker] AutoRetainer postprocess finish failed"); }
+    }
+
+    private void SupersedePostprocess()
+    {
+        postprocess.ForgetFinish();
+        if (postprocess.TakeFinish()) interruptPostprocess?.Invoke();
+    }
+
+    internal void RetryRelease()
+    {
+        if (!ReleasePending || Environment.TickCount64 < retryReleaseAt) return;
+        retryReleaseAt = Environment.TickCount64 + 1000;
+        if (!IsLoaded)
+        {
+            postprocess.ForgetFinish();
+            suppressedByUs = releasePending = false;
+            return;
+        }
+        if (postprocess.FinishPending) FinishPostprocess();
+        if (releasePending) Release();
     }
 
     /// <summary>Null when AutoRetainer is not loaded or the IPC answer could not be read.</summary>
@@ -138,31 +169,40 @@ public sealed class AutoRetainerIpc
     }
 
     /// <summary>Pause AutoRetainer's scheduler / multi mode for the length of our cycle.</summary>
-    public void Suppress()
+    public bool Suppress()
     {
-        if (!isLoaded() || suppressedByUs) return;
+        if (!isLoaded() || suppressedByUs) return true;
         try
         {
             var already = pi.GetIpcSubscriber<bool>("AutoRetainer.GetSuppressed").InvokeFunc();
-            if (already) return; // someone else suppressed it; leave their state alone
+            if (already) return true; // someone else suppressed it; leave their state alone
             pi.GetIpcSubscriber<bool, object>("AutoRetainer.SetSuppressed").InvokeAction(true);
             suppressedByUs = true;
             log.Information("[Restocker] AutoRetainer suppressed for the cycle");
+            return true;
         }
-        catch (Exception ex) { log.Warning(ex, "[Restocker] AutoRetainer suppress failed"); }
+        catch (Exception ex)
+        {
+            log.Warning(ex, "[Restocker] AutoRetainer suppress failed");
+            return false;
+        }
     }
 
     /// <summary>Undo <see cref="Suppress"/>. Safe to call repeatedly.</summary>
     public void Release()
     {
         if (!suppressedByUs) return;
-        suppressedByUs = false;
         try
         {
             pi.GetIpcSubscriber<bool, object>("AutoRetainer.SetSuppressed").InvokeAction(false);
+            suppressedByUs = releasePending = false;
             log.Information("[Restocker] AutoRetainer released");
         }
-        catch (Exception ex) { log.Warning(ex, "[Restocker] AutoRetainer release failed"); }
+        catch (Exception ex)
+        {
+            releasePending = true;
+            log.Warning(ex, "[Restocker] AutoRetainer release failed");
+        }
     }
 
     private static bool Try(Func<bool> f)

@@ -50,7 +50,7 @@ public sealed class AutoCycleController : IDisposable
     public DateTime? NextRunUtc { get; private set; }
     public int ConsecutiveFailures { get; private set; }
     public string? LastSummary { get; private set; }
-    public bool CycleRunning => cycleRunning || ar.HasPostprocess;
+    public bool CycleRunning => cycleRunning || ar.HasPostprocess || ar.ReleasePending;
 
     /// <summary>Max distance (yalms) the player may drift from where the loop was turned on.</summary>
     private const float MoveTolerance = 1.0f;
@@ -79,7 +79,8 @@ public sealed class AutoCycleController : IDisposable
     }
 
     internal void ListenForPostprocess() => ar.ListenForPostprocess(
-        () => configuration.RunFullCycleAfterAutoRetainer && !CycleRunning && !executor.IsRunning, StartPostprocess);
+        () => configuration.RunFullCycleAfterAutoRetainer && !CycleRunning && !executor.IsRunning,
+        StartPostprocess, executor.InterruptAutoRetainerCycle);
 
     public void Dispose()
     {
@@ -165,7 +166,12 @@ public sealed class AutoCycleController : IDisposable
 
     private void Start(bool auto)
     {
-        ar.Suppress();
+        if (!ar.Suppress())
+        {
+            LastSummary = "could not suppress AutoRetainer; cycle skipped";
+            Print(LastSummary);
+            return;
+        }
         try { executor.StartFullCycle(); }
         catch
         {
@@ -194,7 +200,7 @@ public sealed class AutoCycleController : IDisposable
 
     private bool StartPostprocess(string retainerName)
     {
-        if (!configuration.RunFullCycleAfterAutoRetainer || cycleRunning || executor.IsRunning) return false;
+        if (!configuration.RunFullCycleAfterAutoRetainer || cycleRunning || ar.ReleasePending || executor.IsRunning) return false;
         if (UnsafeReason() != null || !executor.StartAutoRetainerCycle(retainerName))
         {
             log.Information($"[Restocker] AutoRetainer postprocess skipped for '{retainerName}'");
@@ -214,11 +220,10 @@ public sealed class AutoCycleController : IDisposable
         arWaitSinceUtc = null;
         bellReopenAtUtc = null;
         WaitingReason = null;
-        // Count the handoff as the timed cycle. Per-retainer durations aren't samples for the all-retainer gate.
-        RestartCountdown();
-
         if (executor.State == ExecutionState.Done && reason == null)
         {
+            // The handoff cannot perform a character-wide restock. Leave that cycle due.
+            if (!configuration.AutoRestockDuringCycle || configuration.LowStock.Count == 0) RestartCountdown();
             ConsecutiveFailures = 0;
             LastSummary = string.Format(Strings.AutoRetainerCycleDone, executor.RepricesApplied, executor.RepricesSkipped);
             Print(LastSummary);
@@ -237,6 +242,8 @@ public sealed class AutoCycleController : IDisposable
         var now = DateTime.UtcNow;
         try
         {
+            ar.RetryRelease();
+            if (ar.ReleasePending) return;
             if (ar.HasPostprocess)
             {
                 if (!executor.IsRunning) FinishPostprocess();
@@ -327,7 +334,7 @@ public sealed class AutoCycleController : IDisposable
         var ok = executor.State == ExecutionState.Done;
         var stamp = DateTime.Now.ToString("HH:mm");
         LastSummary = ok
-            ? $"{stamp} done: {executor.CompletedJobs} retainer(s), {executor.RepricesApplied} repriced, {executor.RepricesSkipped} unchanged/skipped"
+            ? $"{stamp} done: {executor.CompletedRetainers} retainer(s), {executor.RepricesApplied} repriced, {executor.RepricesSkipped} unchanged/skipped"
                 + (executor.ListingsHeld > 0 ? $", {executor.ListingsHeld} held" : string.Empty)
             : $"{stamp} stopped: {executor.StatusMessage}";
         log.Information($"[Restocker] cycle finished: {LastSummary}");

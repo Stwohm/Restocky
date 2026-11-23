@@ -9,6 +9,9 @@ internal sealed class BaitMatchOverrides
     private readonly HashSet<(uint ItemId, bool IsHq)> queued = new();
     private readonly Dictionary<(uint ItemId, bool IsHq), CycleMatch> cycle = new();
 
+    // Chat scrollback survives plugin reloads. Keep the ID stable and distinct from old sequential IDs.
+    internal static uint LinkId(uint itemId, bool isHq) => 0x80000000u | (itemId << 1) | (isHq ? 1u : 0u);
+
     public void Queue(uint itemId, bool isHq) => queued.Add((itemId, isHq));
 
     public void BeginCycle() => cycle.Clear();

@@ -4,7 +4,7 @@ using System.Linq;
 
 namespace Restocker.Market;
 
-internal readonly record struct MarketSale(uint ItemId, bool IsHq, int Quantity, long UnitPrice, DateTime SoldUtc);
+internal readonly record struct MarketSale(uint ItemId, bool IsHq, int Quantity, long UnitPrice, DateTime SoldUtc, string? BuyerName = null);
 
 internal sealed record MarketSaleScan(DateTime ScannedUtc, IReadOnlyList<MarketSale> Sales);
 
@@ -34,7 +34,9 @@ internal sealed record DailyMarketSales(int Total, int Matched, int RecordedOurs
             var matched = new Dictionary<ListingRecord, int>();
             var rows = item.ToArray();
             var eligible = rows.Select(s => candidates[item.Key]
-                .Where(r => (r.RecordedSaleUtc!.Value - s.SoldUtc).Duration() <= MatchTolerance && SamePrice(s, r))
+                .Where(r => (r.RecordedSaleUtc!.Value - s.SoldUtc).Duration() <= MatchTolerance
+                    && (string.IsNullOrEmpty(r.BuyerName) || string.IsNullOrEmpty(s.BuyerName) || r.BuyerName == s.BuyerName)
+                    && SamePrice(s, r))
                 .OrderBy(r => (r.RecordedSaleUtc!.Value - s.SoldUtc).Duration()).ToArray()).ToArray();
             var closestFirst = Enumerable.Range(0, rows.Length).OrderBy(i => eligible[i].Length == 0
                 ? TimeSpan.MaxValue : (eligible[i][0].RecordedSaleUtc!.Value - rows[i].SoldUtc).Duration());

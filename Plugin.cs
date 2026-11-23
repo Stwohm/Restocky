@@ -204,7 +204,7 @@ public sealed class Plugin : IDalamudPlugin
         if (!baitMatchLinks.TryGetValue(key, out var link))
         {
             var displayName = notice.IsHq ? $"{itemName} (HQ)" : itemName;
-            link = ChatGui.AddChatLinkHandler((uint)baitMatchLinks.Count + 1, (_, _) =>
+            link = ChatGui.AddChatLinkHandler(BaitMatchOverrides.LinkId(key.ItemId, key.IsHq), (_, _) =>
             {
                 Executor.QueueBaitMatch(key.ItemId, key.IsHq);
                 ChatPrint(string.Format(Strings.BaitMatchQueued, displayName));

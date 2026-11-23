@@ -12,6 +12,18 @@ public class RepriceRulesTests
     private static readonly RepriceSettings Default = new();
 
     [Theory]
+    [InlineData(200, false)]
+    [InlineData(950, true)]
+    public void Queued_match_does_not_override_or_consume_an_ordinary_market_change(long lowest, bool apply)
+    {
+        var decision = RepriceRules.Decide(1000, [lowest, lowest + 1], 0, Default, includeBait: true);
+        Assert.Equal(apply, decision.Apply);
+        Assert.False(decision.MatchedBait);
+        Assert.False(decision.BypassedMaxDrop);
+        if (!apply) Assert.Equal(RepriceReason.MaxDrop, decision.Reason);
+    }
+
+    [Theory]
     [InlineData(0, 95, RepriceReason.Undercut)]
     [InlineData(250, 250, RepriceReason.Floor)]
     public void Include_bait_uses_the_lowest_offer_with_undercut_and_floor(

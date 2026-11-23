@@ -4,6 +4,24 @@ namespace Restocker.Tests;
 
 public sealed class AutoRetainerPostprocessTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Failed_finish_retries_only_while_the_same_grant_owns_the_lock(bool ownerChanged)
+    {
+        var handoff = new AutoRetainerPostprocess();
+        handoff.OnOffer(true);
+        handoff.OnGrant(true, 0);
+        Assert.Throws<InvalidOperationException>(() => handoff.Finish(() => throw new InvalidOperationException()));
+        Assert.True(handoff.FinishPending);
+        if (ownerChanged) handoff.ForgetFinish();
+        var signals = 0;
+        handoff.Finish(() => signals++);
+        handoff.Finish(() => signals++);
+        Assert.Equal(ownerChanged ? 0 : 1, signals);
+        Assert.False(handoff.FinishPending);
+    }
+
     [Fact]
     public void Ineligible_offer_does_not_claim_a_grant()
     {

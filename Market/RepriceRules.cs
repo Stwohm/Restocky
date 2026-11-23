@@ -57,6 +57,7 @@ public readonly record struct RepriceDecision(
     // Fork: manual prefill keeps the proposed price for either guarded change.
     public bool MarkForReview => Reason is RepriceReason.MaxDrop or RepriceReason.MaxRaise;
     public bool BypassedMaxDrop { get; init; }
+    internal bool MatchedBait { get; init; }
 }
 
 /// <summary>
@@ -96,9 +97,10 @@ public static class RepriceRules
             return new RepriceDecision(currentPrice, false, RepriceReason.NoCompetitor, 0);
 
         var raw = competitorPricesAscending[0];
-        var picked = includeBait
-            ? competitorPricesAscending.FirstOrDefault(price => price > 0)
-            : LowestPriceResolver.Pick(competitorPricesAscending, settings.OutlierMaxGroupSize, settings.OutlierGapRatio, currentPrice);
+        var picked = LowestPriceResolver.Pick(competitorPricesAscending, settings.OutlierMaxGroupSize, settings.OutlierGapRatio, currentPrice);
+        var lowest = includeBait ? competitorPricesAscending.FirstOrDefault(price => price > 0) : picked;
+        var matchedBait = lowest > 0 && lowest < picked;
+        if (matchedBait) picked = lowest;
         if (picked <= 0)
             return new RepriceDecision(currentPrice, false, RepriceReason.Error, 0);
 
@@ -116,12 +118,12 @@ public static class RepriceRules
 
         if (LimitExceeded(currentPrice, target, settings.MaxDropPercent, settings.MaxRaisePercent) is { } limit)
         {
-            if (includeBait && limit == RepriceReason.MaxDrop)
-                return new RepriceDecision(target, true, reason, picked) { BypassedMaxDrop = true };
+            if (matchedBait && limit == RepriceReason.MaxDrop)
+                return new RepriceDecision(target, true, reason, picked) { BypassedMaxDrop = true, MatchedBait = true };
             return new RepriceDecision(target, false, limit, picked);
         }
 
-        return new RepriceDecision(target, true, reason, picked);
+        return new RepriceDecision(target, true, reason, picked) { MatchedBait = matchedBait };
     }
 
     // Fork: the editor and confirmation check the actual proposal, including manual edits.

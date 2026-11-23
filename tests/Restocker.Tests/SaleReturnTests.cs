@@ -7,6 +7,7 @@ public sealed class SaleReturnTests
     [Fact]
     public void EstimatesBothReturnsAfterConfiguredTax()
     {
+        Assert.Equal(default, SaleReturn.Estimate(0, 0.05m, 200m));
         Assert.Equal(new SaleReturn(750m, null), SaleReturn.Estimate(1000, 0.05m, 200m));
         Assert.Equal(new SaleReturn(null, 950m), SaleReturn.Estimate(1000, 0.05m, null));
         Assert.Equal(new SaleReturn(950m, null), SaleReturn.Estimate(1000, 0.05m, 0m));

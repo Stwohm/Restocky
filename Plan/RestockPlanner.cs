@@ -111,17 +111,21 @@ public static class RestockPlanner
     internal static Dictionary<(uint ItemId, bool IsHq), int> SaddleStagingNeeds(
         IEnumerable<PlannedAction> actions, IEnumerable<PlannedAction>? laterActions = null)
     {
+        // Manual plans historically stage only the quantity assigned to the saddlebag.
+        if (laterActions == null)
+            return actions.Where(a => a.Kind == PlannedActionKind.NewListing && a.SourceKey.EndsWith(".saddle"))
+                .GroupBy(a => (a.ItemId, a.IsHQ)).ToDictionary(g => g.Key, g => g.Sum(a => a.Quantity));
+
         // When an item uses the saddlebag, reserve enough in the bag for both sources.
         var needs = actions.Where(a => a.Kind == PlannedActionKind.NewListing && a.SourceKey.StartsWith("char."))
             .GroupBy(a => (a.ItemId, a.IsHQ))
             .Where(g => g.Any(a => a.SourceKey.EndsWith(".saddle")))
             .ToDictionary(g => g.Key, g => g.Sum(a => a.Quantity));
-        if (laterActions != null)
-            foreach (var action in laterActions.Where(a => a.Kind == PlannedActionKind.NewListing && a.SourceKey.EndsWith(".bag")))
-            {
-                var key = (action.ItemId, action.IsHQ);
-                if (needs.TryGetValue(key, out var need)) needs[key] = need + action.Quantity;
-            }
+        foreach (var action in laterActions.Where(a => a.Kind == PlannedActionKind.NewListing && a.SourceKey.EndsWith(".bag")))
+        {
+            var key = (action.ItemId, action.IsHQ);
+            if (needs.TryGetValue(key, out var need)) needs[key] = need + action.Quantity;
+        }
         return needs;
     }
 

@@ -5,6 +5,18 @@ namespace Restocker.Tests;
 public sealed class RunEtaTests
 {
     [Fact]
+    public void Starting_at_an_open_sell_list_keeps_earlier_jobs_and_saddle_staging()
+    {
+        var a = new RetainerVisitJob { RetainerName = "A", Actions = [] };
+        var b = new RetainerVisitJob { RetainerName = "B", Actions =
+            [new() { Kind = Restocker.Data.PlannedActionKind.NewListing, SourceKey = "char.1.saddle" }] };
+        var jobs = new System.Collections.Generic.List<RetainerVisitJob> { a, b };
+        Assert.True(RetainerVisitJob.StartAtActive(jobs, "B"));
+        Assert.Equal(new[] { b, a }, jobs);
+        Assert.True(jobs[0].NeedsSaddleStaging);
+    }
+
+    [Fact]
     public void UsesCycleAverageUntilAUnitFinishes()
     {
         var elapsed = TimeSpan.FromSeconds(20);

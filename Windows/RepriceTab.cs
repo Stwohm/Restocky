@@ -609,6 +609,11 @@ public sealed class RepriceTab
             SaleReturnDisplay.DrawEarning(earning, "N0");
             return returns;
         }
+        else
+        {
+            ImGui.TextDisabled("—");
+            return returns;
+        }
 
         if (!ImGui.IsItemHovered()) return returns;
         ImGui.BeginTooltip();
@@ -805,7 +810,7 @@ public sealed class RepriceTab
             {
                 var floor = configuration.EffectiveFloorFor(l.ItemId, l.IsHQ, costLedger);
                 var decision = RepriceRules.Decide(l.UnitPrice, [bait], floor.Price,
-                    configuration.ToRepriceSettings(), includeBait: true);
+                    configuration.ToRepriceSettings(undercutDelta), includeBait: true);
                 editedPrice[key] = (decision.NewPrice, floor.FromCost && decision.Reason == RepriceReason.Floor);
                 RemovePlanIfExists(snap.Key, l.ListingIndex);
             }

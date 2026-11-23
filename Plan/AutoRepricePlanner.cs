@@ -104,6 +104,7 @@ public static class AutoRepricePlanner
                     LowestCompetitor = d.LowestCompetitor,
                     Reason = d.Reason,
                     BypassedMaxDrop = d.BypassedMaxDrop,
+                    MatchedBait = d.MatchedBait,
                     Undercutters = undercutters,
                 });
             }
