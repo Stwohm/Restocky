@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using Dalamud.Game.Network.Structures;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
@@ -16,6 +18,10 @@ public sealed unsafe class MarketWatcher : IDisposable
     private readonly IObjectTable objectTable;
     private readonly IPluginLog log;
     public MarketCache Cache { get; } = new();
+    private readonly ConcurrentDictionary<(uint WorldId, uint ItemId), MarketSaleScan> saleHistory = new();
+
+    internal uint HomeWorldId => objectTable.LocalPlayer?.HomeWorld.RowId ?? 0;
+    internal IEnumerable<KeyValuePair<(uint WorldId, uint ItemId), MarketSaleScan>> SaleHistory => saleHistory;
 
     /// <summary>
     /// Fork: fired for answers that belong to our own fetch (expected item set), i.e. the home
@@ -53,11 +59,28 @@ public sealed unsafe class MarketWatcher : IDisposable
         this.objectTable = objectTable;
         this.log = log;
         marketBoard.OfferingsReceived += OnOfferingsReceived;
+        marketBoard.HistoryReceived += OnHistoryReceived;
     }
 
     public void Dispose()
     {
         marketBoard.OfferingsReceived -= OnOfferingsReceived;
+        marketBoard.HistoryReceived -= OnHistoryReceived;
+    }
+
+    private void OnHistoryReceived(IMarketBoardHistory history)
+    {
+        var player = objectTable.LocalPlayer;
+        var homeWorld = player?.HomeWorld.RowId ?? 0;
+        var itemId = history.ItemId;
+        if (!MarketWorldGate.Accept(player?.CurrentWorld.RowId ?? 0, homeWorld)
+            || itemId == 0 || (expectedItemId is { } expected && expected != itemId)) return;
+
+        var sales = history.HistoryListings
+            .Where(s => s.SalePrice > 0 && s.Quantity is > 0 and <= int.MaxValue)
+            .Select(s => new MarketSale(itemId, s.IsHq, (int)s.Quantity, s.SalePrice, s.PurchaseTime))
+            .ToArray();
+        saleHistory[(homeWorld, itemId)] = new MarketSaleScan(DateTime.UtcNow, sales);
     }
 
     private void OnOfferingsReceived(IMarketBoardCurrentOfferings offerings)

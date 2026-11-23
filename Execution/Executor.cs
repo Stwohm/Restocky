@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
@@ -45,7 +46,13 @@ public sealed unsafe class Executor : IDisposable
     public int TotalActions { get; private set; }
     public bool IsRunning => State != ExecutionState.Idle && State != ExecutionState.Done && State != ExecutionState.Stopped;
     public string CurrentStateLabel => State.ToString();
+    internal TimeSpan? EstimatedRemaining => RunEta.Estimate(runClock.Elapsed, CompletedActions, TotalActions,
+        CompletedJobs, CompletedJobs + jobs.Count - jobCursor, observedFetchJobs, pendingFetchJobs, initialRunDuration);
 
+    private readonly Stopwatch runClock = new();
+    private TimeSpan? initialRunDuration;
+    private int observedFetchJobs;
+    private int pendingFetchJobs;
     private readonly List<RetainerVisitJob> jobs = new();
     private int jobCursor;
     private readonly HashSet<string> historyRequested = new();
@@ -409,6 +416,12 @@ public sealed unsafe class Executor : IDisposable
         CompletedJobs = 0;
         CompletedActions = 0;
         TotalActions = jobs.Sum(j => j.Actions.Count);
+        runClock.Restart();
+        initialRunDuration = mode == ExecutionMode.FullCycle && configuration.RecentCycleSeconds.Count > 0
+            ? AutoRetainerGate.ExpectedCycle(configuration.RecentCycleSeconds)
+            : null;
+        observedFetchJobs = 0;
+        pendingFetchJobs = jobs.Count(j => j.FetchPrices);
         cancelRequested = false;
         StatusMessage = null;
         waitingSince = null;
@@ -433,6 +446,7 @@ public sealed unsafe class Executor : IDisposable
             if (firstMatchIdx >= 0)
             {
                 jobCursor = firstMatchIdx;
+                pendingFetchJobs -= jobs.Take(firstMatchIdx).Count(j => j.FetchPrices);
                 EnterJob();
                 State = ExecutionState.PerformingAction;
                 log.Info($"[Restocker] Executor start (smart): mode={mode}, jobs={jobs.Count}, actions={TotalActions}, starting at active retainer '{activeName}'");
@@ -875,6 +889,8 @@ public sealed unsafe class Executor : IDisposable
         fetchRows = new FetchRowQueue(live.Count, unique.Count);
         JobFetchStartUtc = DateTime.UtcNow;
         TotalActions += live.Count;
+        observedFetchJobs++;
+        pendingFetchJobs--;
         log.Information($"[Restocker] fetch phase: {jobs[jobCursor].RetainerName} rows={live.Count} unique={unique.Count}");
     }
 

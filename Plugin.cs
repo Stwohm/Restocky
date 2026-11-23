@@ -48,7 +48,7 @@ public sealed class Plugin : IDalamudPlugin
     private BellWatcher BellWatcher { get; }
     private AutoRetainerDetector ArDetector { get; }
     private Executor Executor { get; }
-    private MarketWatcher MarketWatcher { get; }
+    internal MarketWatcher MarketWatcher { get; }
     private UndercutHistoryHost Undercuts { get; }
     internal UndercutHistory UndercutHistory => Undercuts.History;
     internal ListingMarketScans ListingScans => Undercuts.ListingScans;

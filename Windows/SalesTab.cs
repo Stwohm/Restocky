@@ -18,8 +18,11 @@ public sealed class SalesTab
 
     public void Draw()
     {
-        var host = Plugin.Instance?.Tracker;
-        if (host == null || !ImGui.BeginTabBar("##sales-sections")) return;
+        var plugin = Plugin.Instance;
+        if (plugin == null) return;
+        var host = plugin.Tracker;
+        DailyMarketSalesDisplay.Draw(plugin.MarketWatcher.HomeWorldId);
+        if (!ImGui.BeginTabBar("##sales-sections")) return;
         var now = DateTime.UtcNow;
         if (ImGui.BeginTabItem(Strings.SalesListings + "###sales-listings"))
         {
@@ -82,9 +85,11 @@ public sealed class SalesTab
         if (sold.Count > 0)
         {
             ImGui.TextDisabled($"Sold: {sold.Count} listings, {sold.Sum(r => r.SoldTotalGil):N0} gil, avg {sold.Average(r => r.DaysListed):0.0} days, avg {sold.Average(r => r.RepriceCount):0.0} reprices");
-            var total = sold.Any(r => r.RealizedProfit.HasValue) ? sold.Sum(r => r.RealizedProfit).GetValueOrDefault().ToString("N2") : "—";
-            ImGui.TextUnformatted(string.Format(Strings.SalesProfitTotal, total));
-            var incomplete = sold.Count(r => r.RealizedProfit == null || r.UnknownCostUnits > 0);
+            var returns = sold.Select(SaleReturn.Realized).ToList();
+            ImGui.TextUnformatted(string.Format(Strings.ProfitEarningTotals,
+                returns.Sum(r => r.Profit).GetValueOrDefault().ToString("N2"),
+                returns.Sum(r => r.Earning).GetValueOrDefault().ToString("N2")));
+            var incomplete = returns.Count(r => r.Profit == null && r.Earning == null);
             if (incomplete > 0)
             {
                 ImGui.SameLine();
@@ -141,12 +146,20 @@ public sealed class SalesTab
 
     private static void DrawRealizedProfit(ListingRecord sale)
     {
-        var value = sale.RealizedProfit?.ToString("N2") ?? "—";
-        ImGui.TextUnformatted(sale.RealizedProfit != null && sale.UnknownCostUnits > 0 ? value + "*" : value);
-        if (!ImGui.IsItemHovered()) return;
-        ImGui.SetTooltip(sale.ConsumedCost is { } cost
-            ? string.Format(Strings.SalesProfitDetails, cost, sale.UnknownCostUnits)
-            : Strings.SalesNoCostBasis);
+        var returns = SaleReturn.Realized(sale);
+        if (returns.Profit is { } profit)
+        {
+            ImGui.TextUnformatted(profit.ToString("N2") + (returns.Earning.HasValue ? "*" : ""));
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip(string.Format(Strings.SalesProfitDetails, sale.ConsumedCost, sale.UnknownCostUnits));
+        }
+        if (returns.Earning is { } earning)
+        {
+            if (returns.Profit.HasValue) ImGui.SameLine();
+            SaleReturnDisplay.DrawEarning(earning, "N2");
+        }
+        if (returns.Profit == null && returns.Earning == null)
+            ImGui.TextDisabled("—");
     }
 
     private static void DrawVelocity(ListingTracker tracker, DateTime now)

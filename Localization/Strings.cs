@@ -74,10 +74,19 @@ public static class Strings
     public static string SalesPeriod => T("Period", "期間", "Zeitraum", "Période", "时段", "기간");
     public static string SalesAllTime => T("All time", "全期間", "Gesamter Zeitraum", "Tout l’historique", "全部时间", "전체 기간");
     public static string SalesRealizedProfit => T("Realized profit", "実現利益", "Realisierter Gewinn", "Bénéfice réalisé", "已实现利润", "실현 이익");
-    public static string SalesProfitTotal => T("Total realized profit  {0}", "実現利益合計  {0}", "Realisierter Gewinn gesamt  {0}", "Bénéfice réalisé total  {0}", "已实现利润合计  {0}", "실현 이익 합계  {0}");
-    public static string SalesProfitIncomplete => T("({0:N0} sales with missing cost or proceeds)", "（原価または売上が不明な取引 {0:N0} 件）", "({0:N0} Verkäufe mit fehlenden Kosten oder Erlösen)", "({0:N0} ventes avec coût ou recette manquants)", "（{0:N0} 笔交易缺少成本或收入）", "(원가 또는 판매 대금이 누락된 거래 {0:N0}건)");
+    public static string ProfitEarningTotals => T("Profit: {0} · Earning (no cost): {1}", "利益: {0} · 原価不明の収益: {1}", "Gewinn: {0} · Erlös ohne Kosten: {1}", "Bénéfice : {0} · Recettes sans coût : {1}", "利润：{0} · 无成本收入：{1}", "이익: {0} · 원가 미기록 수익: {1}");
+    public static string EarningTooltip => T("Earning — no purchase cost recorded (gathered / unknown)", "収益 — 購入原価の記録なし（採集・不明）", "Erlös — keine Einkaufskosten erfasst (gesammelt / unbekannt)", "Recettes — aucun coût d’achat enregistré (récolté / inconnu)", "收入 — 未记录购入成本（采集／未知）", "수익 — 구입 원가 미기록 (채집 / 미상)");
+    public static string SalesProfitIncomplete => T("({0:N0} sales with missing proceeds)", "（売上不明 {0:N0} 件）", "({0:N0} Verkäufe ohne Erlösangabe)", "({0:N0} ventes avec recettes inconnues)", "（{0:N0} 笔交易收入未知）", "(판매 대금 미상 {0:N0}건)");
+    public static string TodayMarketSales => T("Today: {0:N0} sales (ours {1:N0}) · lost {2:N0}", "今日: {0:N0} 件（自分 {1:N0}） · 他者 {2:N0}", "Heute: {0:N0} Verkäufe (eigene {1:N0}) · verloren {2:N0}", "Aujourd’hui : {0:N0} ventes (nous : {1:N0}) · perdues : {2:N0}", "今日：{0:N0} 笔（我方 {1:N0}）· 流失 {2:N0}", "오늘: 판매 {0:N0}건 (내 판매 {1:N0}건) · 놓친 판매 {2:N0}건");
+    public static string TodayOwnSales => T("Today: {0:N0} own sales · market history unavailable", "今日: 自分の販売 {0:N0} 件 · 市場履歴なし", "Heute: {0:N0} eigene Verkäufe · kein Marktverlauf", "Aujourd’hui : {0:N0} ventes à nous · historique du marché indisponible", "今日：我方 {0:N0} 笔 · 无市场记录", "오늘: 내 판매 {0:N0}건 · 시장 내역 없음");
+    public static string TodayMarketScope => T("(recent history for {0:N0} items)", "（{0:N0} 品目の直近履歴）", "(jüngster Verlauf für {0:N0} Artikel)", "(historique récent de {0:N0} articles)", "（{0:N0} 种物品的近期记录）", "(아이템 {0:N0}종의 최근 내역)");
+    public static string TodayRecordedOurs => T("Own sales recorded today: {0:N0}", "今日記録された自分の販売: {0:N0} 件", "Heute erfasste eigene Verkäufe: {0:N0}", "Nos ventes enregistrées aujourd’hui : {0:N0}", "今日已记录的我方成交：{0:N0}", "오늘 기록된 내 판매: {0:N0}건");
+    public static string ItemMarketScope => T("Recent market history as of {0:t} · own sales recorded today: {1:N0}", "{0:t} 時点の直近履歴 · 自分の販売記録: {1:N0} 件", "Jüngster Verlauf um {0:t} · heute erfasste eigene Verkäufe: {1:N0}", "Historique récent à {0:t} · nos ventes enregistrées aujourd’hui : {1:N0}", "截至 {0:t} 的近期记录 · 今日我方记录：{1:N0} 笔", "{0:t} 기준 최근 내역 · 오늘 기록된 내 판매: {1:N0}건");
+    public static string LostSaleRow => T("{0:t} · {1:N0}× · {2:N0} gil each · {3}", "{0:t} · {1:N0} 個 · 単価 {2:N0} ギル · {3}", "{0:t} · {1:N0}× · je {2:N0} Gil · {3}", "{0:t} · {1:N0}× · {2:N0} gils l’unité · {3}", "{0:t} · {1:N0} 件 · 单价 {2:N0} 金币 · {3}", "{0:t} · {1:N0}개 · 개당 {2:N0}길 · {3}");
+    public static string LostSalesLog => T("Latest lost sales", "直近の他者の販売", "Letzte verlorene Verkäufe", "Dernières ventes perdues", "最近流失的成交", "최근 놓친 판매");
+    public static string QualityHq => "HQ";
+    public static string QualityNq => "NQ";
     public static string SalesProfitDetails => T("Recorded cost  {0:N2}\nUnits with unknown cost  {1:N0}", "記録原価  {0:N2}\n原価不明の個数  {1:N0}", "Erfasste Kosten  {0:N2}\nStück ohne bekannte Kosten  {1:N0}", "Coût enregistré  {0:N2}\nUnités au coût inconnu  {1:N0}", "已记录成本  {0:N2}\n成本未知的数量  {1:N0}", "기록된 원가  {0:N2}\n원가 미상 수량  {1:N0}");
-    public static string SalesNoCostBasis => T("No cost basis was recorded for this sale.", "この取引の原価は記録されていません。", "Für diesen Verkauf wurden keine Kosten erfasst.", "Aucun coût d’achat enregistré pour cette vente.", "此笔交易未记录成本。", "이 거래의 원가가 기록되지 않았습니다.");
     public static string StuckSetting => T("Stuck listing age (days)", "滞留とみなす出品日数", "Alter für Ladenhüter (Tage)", "Âge des annonces stagnantes (jours)", "滞销判定天数", "장기 미판매 기준(일)");
     public static string StuckListings => T("Stuck", "滞留", "Ladenhüter", "En stagnation", "滞销", "장기 미판매");
     public static string StuckEmpty => T("No stuck listings.", "滞留している出品はありません。", "Keine Ladenhüter.", "Aucune annonce stagnante.", "没有滞销商品。", "장기 미판매 등록이 없습니다.");
@@ -319,6 +328,13 @@ public static class Strings
 
     // Progress dialog
     public static string ProgressMode => T("Mode", "モード", "Modus", "Mode", "模式", "모드");
+    public static string ProgressEta(System.TimeSpan? remaining)
+    {
+        if (remaining is not { } eta)
+            return T("ETA: --", "残り: --", "Restzeit: --", "Temps restant : --", "预计剩余：--", "남은 시간: --");
+        var seconds = (long)System.Math.Ceiling(eta.TotalSeconds);
+        return string.Format(T("ETA {0}m {1}s", "残り {0}分 {1}秒", "Restzeit {0} Min. {1} Sek.", "Reste {0} min {1} s", "预计剩余 {0}分 {1}秒", "남은 시간 {0}분 {1}초"), seconds / 60, seconds % 60);
+    }
     public static string ProgressModeRefresh => T("Refresh all", "全リテイナー更新", "Aktualisieren", "Rafraîchir", "全部刷新", "모두 갱신");
     public static string ProgressModeApply => T("Apply actions", "アクション実行", "Aktionen anwenden", "Exécuter", "执行操作", "작업 적용");
     public static string ProgressStep => T("Step", "ステップ", "Schritt", "Étape", "步骤", "단계");

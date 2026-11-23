@@ -107,7 +107,7 @@ public sealed class MainWindow : Window, IDisposable
             var statusLabel = executor.Mode == ExecutionMode.RefreshAll
                 ? string.Format(Strings.HeaderRefreshing, executor.CompletedJobs, executor.TotalJobs)
                 : string.Format(Strings.ApplyProgress, executor.CompletedActions, executor.TotalActions, executor.CompletedJobs, executor.TotalJobs);
-            ImGui.TextUnformatted(statusLabel);
+            ImGui.TextUnformatted($"{statusLabel} · {Strings.ProgressEta(executor.EstimatedRemaining)}");
             ImGui.SameLine();
             if (ImGui.SmallButton(Strings.HeaderStop)) executor.Cancel();
             if (!string.IsNullOrEmpty(executor.CurrentStateLabel))

@@ -47,6 +47,7 @@ public sealed class ProgressWindow : Window
 
         // state 行
         ImGui.TextUnformatted($"{Strings.ProgressStep}: {LocalizeState(executor.State)}");
+        ImGui.TextUnformatted(Strings.ProgressEta(executor.EstimatedRemaining));
 
         // ジョブ進捗
         if (executor.TotalJobs > 0)

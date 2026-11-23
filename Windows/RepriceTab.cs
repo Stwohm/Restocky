@@ -495,6 +495,8 @@ public sealed class RepriceTab
         var now = DateTime.UtcNow;
         var tracked = tracker.Records.Where(r => r.RetainerKey == snap.Key && r.Outcome == ListingTracker.Active)
             .ToLookup(r => (r.Slot, r.ItemId, r.IsHq, r.Quantity));
+        decimal profit = 0;
+        decimal earning = 0;
         foreach (var (l, itemName) in rows)
         {
             var name = DisplayListingName(l, itemName);
@@ -509,12 +511,14 @@ public sealed class RepriceTab
             ImGui.TableNextColumn();
             ImGui.TextUnformatted(l.UnitPrice == 0 ? Strings.PriceUnknown : l.UnitPrice.ToString("N0"));
             ImGui.TableNextColumn();
-            DrawUndercutters(snap.Key, l);
+            DrawUndercutters(snap, l);
             ImGui.TableNextColumn();
             var editKey = EditKey(snap.Key, l);
             DrawPriceInput(editKey, l);
             ImGui.TableNextColumn();
-            DrawProfit(l, editedPrice.GetValueOrDefault(editKey).Price);
+            var returns = DrawProfit(l, editedPrice.GetValueOrDefault(editKey).Price);
+            profit += returns.Profit.GetValueOrDefault() * l.Quantity;
+            earning += returns.Earning.GetValueOrDefault() * l.Quantity;
             ImGui.TableNextColumn();
             DrawHoldCheckbox(snap.Key, l);
             ImGui.TableNextColumn();
@@ -524,6 +528,7 @@ public sealed class RepriceTab
         }
 
         ImGui.EndTable();
+        ImGui.TextUnformatted(string.Format(Strings.ProfitEarningTotals, profit.ToString("N0"), earning.ToString("N0")));
     }
 
     private void SetupSortableColumn(string label, ImGuiTableColumnFlags flags, float width, RepriceSortColumn column)
@@ -577,25 +582,28 @@ public sealed class RepriceTab
     }
 
     // Fork: show per-unit profit using the next lot's cost.
-    private void DrawProfit(ListingEntry listing, long edited)
+    private SaleReturn DrawProfit(ListingEntry listing, long edited)
     {
         var price = edited > 0 ? edited : listing.UnitPrice;
         var saleTaxRate = (decimal)configuration.SaleTaxPercent / 100m;
-        var afterTax = price * (1m - saleTaxRate);
         var unitCost = costLedger.CurrentUnitCost(listing.ItemId, listing.IsHQ);
-        if (unitCost is { } cost)
+        var returns = SaleReturn.Estimate(price, saleTaxRate, unitCost);
+        if (returns.Profit is { } profit)
         {
-            var profit = afterTax - cost;
             var color = profit > 0
                 ? new System.Numerics.Vector4(0.4f, 0.85f, 0.45f, 1f)
                 : new System.Numerics.Vector4(1f, 0.45f, 0.4f, 1f);
             ImGui.TextColored(color, profit.ToString("N0"));
         }
-        else
-            ImGui.TextDisabled("-");
+        else if (returns.Earning is { } earning)
+        {
+            SaleReturnDisplay.DrawEarning(earning, "N0");
+            return returns;
+        }
 
-        if (!ImGui.IsItemHovered()) return;
+        if (!ImGui.IsItemHovered()) return returns;
         ImGui.BeginTooltip();
+        var afterTax = returns.Profit.GetValueOrDefault() + unitCost.GetValueOrDefault();
         ImGui.TextUnformatted($"{Strings.CostUnitCost}  {unitCost?.ToString("N2") ?? "-"}");
         ImGui.TextUnformatted(string.Format(Strings.CostPriceAfterTax, saleTaxRate, afterTax));
         ImGui.TextUnformatted($"{Strings.CostWeightedAverage}  {costLedger.WeightedAverageCost(listing.ItemId, listing.IsHQ)?.ToString("N2") ?? "-"}");
@@ -607,12 +615,13 @@ public sealed class RepriceTab
                 ImGui.TextUnformatted(string.Format(Strings.CostLotDetails, lot.Utc.ToLocalTime(), lot.RemainingQuantity, lot.UnitCost, Strings.CostSourceName(lot.Source)));
         }
         ImGui.EndTooltip();
+        return returns;
     }
 
     // Fork: display competitors from the last scan and the past week's most active rivals.
-    private void DrawUndercutters(string retainerKey, ListingEntry listing)
+    private void DrawUndercutters(RetainerSnapshot snap, ListingEntry listing)
     {
-        var scan = Plugin.Instance.ListingScans.Get(retainerKey, listing.ListingIndex, listing.ItemId, listing.IsHQ);
+        var scan = Plugin.Instance.ListingScans.Get(snap.Key, listing.ListingIndex, listing.ItemId, listing.IsHQ);
         if (scan is { WasUndercut: true })
             ImGui.TextColored(new System.Numerics.Vector4(0.95f, 0.8f, 0.4f, 1f), "(!)");
         else
@@ -694,6 +703,9 @@ public sealed class RepriceTab
             ImGui.TextDisabled(Strings.UndercuttersCountHelp);
             ImGui.PopTextWrapPos();
         }
+        ImGui.Separator();
+        var worldId = snap.WorldId == 0 ? Plugin.Instance.MarketWatcher.HomeWorldId : snap.WorldId;
+        DailyMarketSalesDisplay.Draw(worldId, listing.ItemId);
         ImGui.EndTooltip();
     }
 
