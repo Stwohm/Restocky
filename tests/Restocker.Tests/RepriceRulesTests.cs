@@ -11,6 +11,59 @@ public class RepriceRulesTests
 {
     private static readonly RepriceSettings Default = new();
 
+    [Theory]
+    [InlineData(0, 95, RepriceReason.Undercut)]
+    [InlineData(250, 250, RepriceReason.Floor)]
+    public void Include_bait_uses_the_lowest_offer_with_undercut_and_floor(
+        long floor, long expectedPrice, RepriceReason reason)
+    {
+        long[] prices = [100, 900, 920];
+        var settings = new RepriceSettings { UndercutGil = 5 };
+        var normal = RepriceRules.Decide(1_000, prices, floor, settings);
+        var match = RepriceRules.Decide(1_000, prices, floor, settings, includeBait: true);
+
+        Assert.Equal(900, normal.LowestCompetitor);
+        Assert.False(normal.BypassedMaxDrop);
+        Assert.Equal(100, match.LowestCompetitor);
+        Assert.Equal(expectedPrice, match.NewPrice);
+        Assert.Equal(reason, match.Reason);
+        Assert.True(match.Apply);
+        Assert.True(match.BypassedMaxDrop);
+    }
+
+    [Fact]
+    public void Include_bait_still_enforces_max_raise()
+    {
+        var match = RepriceRules.Decide(100, [50, 100, 120], 150, Default, includeBait: true);
+
+        Assert.Equal(150, match.NewPrice);
+        Assert.Equal(RepriceReason.MaxRaise, match.Reason);
+        Assert.False(match.Apply);
+        Assert.False(match.BypassedMaxDrop);
+    }
+
+    [Fact]
+    public void Planner_matches_all_unheld_copies_and_remembers_bait_per_listing()
+    {
+        LiveListing[] listings = [new(0, 1, true, 1, 1_000), new(1, 1, true, 5, 1_000),
+            new(2, 1, false, 1, 1_000), new(3, 2, true, 1, 1_000)];
+        MarketOffer[] offers = [new(100, "Bait", 1), new(900, "Rival", 1), new(920, "Rival", 1)];
+        var plan = AutoRepricePlanner.Plan("k", "R", listings, (_, _) => offers, (_, _) => 0,
+            Default, DateTime.UtcNow, isHeld: (id, _) => id == 2, includeBaitForPlan: (_, hq) => hq);
+
+        Assert.All(plan.Actions.Where(a => a.IsHQ), a =>
+        {
+            Assert.Equal(99, a.UnitPrice);
+            Assert.True(a.BypassedMaxDrop);
+        });
+        Assert.Equal(2, plan.Actions.Count(a => a.IsHQ));
+        Assert.Equal(RepriceReason.Held, Assert.Single(plan.NotApplied).Reason);
+        var bait = Assert.Single(plan.BaitPrices);
+        Assert.Equal((2, 1u, false), bait.Key);
+        Assert.Equal(100, bait.Value);
+        Assert.False(Assert.Single(plan.Baits).IsHq);
+    }
+
     [Fact]
     public void Undercuts_lowest_competitor_by_one()
     {

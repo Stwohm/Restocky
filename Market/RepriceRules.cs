@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace Restocker.Market;
 
@@ -55,6 +56,7 @@ public readonly record struct RepriceDecision(
 {
     // Fork: manual prefill keeps the proposed price for either guarded change.
     public bool MarkForReview => Reason is RepriceReason.MaxDrop or RepriceReason.MaxRaise;
+    public bool BypassedMaxDrop { get; init; }
 }
 
 /// <summary>
@@ -87,18 +89,20 @@ public static class RepriceRules
         long currentPrice,
         IReadOnlyList<long> competitorPricesAscending,
         long floor,
-        RepriceSettings settings)
+        RepriceSettings settings,
+        bool includeBait = false)
     {
         if (competitorPricesAscending.Count == 0)
             return new RepriceDecision(currentPrice, false, RepriceReason.NoCompetitor, 0);
 
         var raw = competitorPricesAscending[0];
-        var picked = LowestPriceResolver.Pick(
-            competitorPricesAscending, settings.OutlierMaxGroupSize, settings.OutlierGapRatio, currentPrice);
+        var picked = includeBait
+            ? competitorPricesAscending.FirstOrDefault(price => price > 0)
+            : LowestPriceResolver.Pick(competitorPricesAscending, settings.OutlierMaxGroupSize, settings.OutlierGapRatio, currentPrice);
         if (picked <= 0)
             return new RepriceDecision(currentPrice, false, RepriceReason.Error, 0);
 
-        var reason = picked != raw ? RepriceReason.Outlier : RepriceReason.Undercut;
+        var reason = !includeBait && picked != raw ? RepriceReason.Outlier : RepriceReason.Undercut;
         var target = Math.Max(1, picked - Math.Max(0, settings.UndercutGil));
 
         if (floor > 0 && target < floor)
@@ -111,7 +115,11 @@ public static class RepriceRules
             return new RepriceDecision(target, false, RepriceReason.NoChange, picked);
 
         if (LimitExceeded(currentPrice, target, settings.MaxDropPercent, settings.MaxRaisePercent) is { } limit)
+        {
+            if (includeBait && limit == RepriceReason.MaxDrop)
+                return new RepriceDecision(target, true, reason, picked) { BypassedMaxDrop = true };
             return new RepriceDecision(target, false, limit, picked);
+        }
 
         return new RepriceDecision(target, true, reason, picked);
     }

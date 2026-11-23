@@ -21,6 +21,7 @@ public static class AutoRepricePlanner
 
         /// <summary>Competitor listings ignored as bait, one notice per (item, hq).</summary>
         public List<BaitNotice> Baits { get; } = new();
+        internal Dictionary<(int Slot, uint ItemId, bool IsHq), long> BaitPrices { get; } = new();
 
         public int HeldCount { get; internal set; }
     }
@@ -38,11 +39,13 @@ public static class AutoRepricePlanner
         RepriceSettings settings,
         DateTime nowUtc,
         Func<uint, bool, bool>? isHeld = null,
-        Action<LiveListing, RepriceDecision, IReadOnlyList<MarketOffer>>? onDecision = null)
+        Action<LiveListing, RepriceDecision, IReadOnlyList<MarketOffer>>? onDecision = null,
+        Func<uint, bool, bool>? includeBaitForPlan = null)
     {
         var result = new Result();
         foreach (var l in listings)
         {
+            var includeBait = includeBaitForPlan?.Invoke(l.ItemId, l.IsHQ) == true;
             if (isHeld?.Invoke(l.ItemId, l.IsHQ) == true)
             {
                 result.HeldCount++;
@@ -73,11 +76,15 @@ public static class AutoRepricePlanner
                 var prices = new List<long>(offers.Count);
                 foreach (var o in offers) prices.Add(o.Price);
                 prices.Sort();
-                d = RepriceRules.Decide(l.UnitPrice, prices, floorFor(l.ItemId, l.IsHQ), settings);
+                d = RepriceRules.Decide(l.UnitPrice, prices, floorFor(l.ItemId, l.IsHQ), settings, includeBait);
                 undercutters = MarketOfferFormat.Undercutters(offers, l.UnitPrice);
                 var dropped = BaitFinder.Dropped(offers, d.LowestCompetitor);
-                if (dropped.Count > 0 && !result.Baits.Exists(b => b.ItemId == l.ItemId && b.IsHq == l.IsHQ))
-                    result.Baits.Add(new BaitNotice(l.ItemId, l.IsHQ, retainerName, dropped, d.LowestCompetitor));
+                if (dropped.Count > 0)
+                {
+                    result.BaitPrices[(l.Slot, l.ItemId, l.IsHQ)] = dropped[0].Price;
+                    if (!result.Baits.Exists(b => b.ItemId == l.ItemId && b.IsHq == l.IsHQ))
+                        result.Baits.Add(new BaitNotice(l.ItemId, l.IsHQ, retainerName, dropped, d.LowestCompetitor));
+                }
             }
 
             onDecision?.Invoke(l, d, offers ?? Array.Empty<MarketOffer>());
@@ -96,6 +103,7 @@ public static class AutoRepricePlanner
                     OldPrice = l.UnitPrice,
                     LowestCompetitor = d.LowestCompetitor,
                     Reason = d.Reason,
+                    BypassedMaxDrop = d.BypassedMaxDrop,
                     Undercutters = undercutters,
                 });
             }

@@ -104,6 +104,17 @@ public sealed unsafe class Executor : IDisposable
 
     /// <summary>Bait notices already shown this session (key = BaitFinder.Key).</summary>
     private readonly HashSet<string> reportedBaits = new();
+    private readonly BaitMatchOverrides baitMatches = new();
+    private readonly Dictionary<string, Dictionary<(int Slot, uint ItemId, bool IsHq), long>> lastBaitPrices = new();
+
+    internal void QueueBaitMatch(uint itemId, bool isHq) => baitMatches.Queue(itemId, isHq);
+
+    internal Dictionary<(int Slot, uint ItemId, bool IsHq), long> LastBaitPricesFor(string retainerKey)
+    {
+        if (!lastBaitPrices.TryGetValue(retainerKey, out var prices))
+            lastBaitPrices[retainerKey] = prices = new();
+        return prices;
+    }
 
     /// <summary>Fork: append-only price-history.csv. Null = disabled.</summary>
     public PriceHistoryLog? History { get; set; }
@@ -411,6 +422,7 @@ public sealed unsafe class Executor : IDisposable
     private void Begin(ExecutionMode mode)
     {
         Mode = mode;
+        if (mode == ExecutionMode.FullCycle) baitMatches.BeginCycle();
         historyRequested.Clear();
         jobCursor = 0;
         CompletedJobs = 0;
@@ -933,8 +945,10 @@ public sealed unsafe class Executor : IDisposable
                     log.Warning($"[Restocker] not applied ({reason}): {details}");
                 else
                     log.Information($"[Restocker] reprice decision ({reason}): {details}");
-            });
+            },
+            baitMatches.IncludeBaitForPlan);
 
+        lastBaitPrices[key] = plan.BaitPrices;
         ListingsHeld += plan.HeldCount;
 
         foreach (var row in plan.NotApplied)
@@ -952,7 +966,7 @@ public sealed unsafe class Executor : IDisposable
                 ? row.Name.ExtractText() : $"#{b.ItemId}";
             var msg = BaitFinder.Format(name, b);
             log.Information($"[Restocker] {msg}");
-            Plugin.ChatPrint(msg);
+            Plugin.Instance?.PrintBaitMatchLink(msg, name, b);
         }
         foreach (var a in plan.Actions) currentJobActions.Enqueue(a);
         TotalActions += plan.Actions.Count;
@@ -1138,6 +1152,8 @@ public sealed unsafe class Executor : IDisposable
     private void TickPendingReprice(PlannedAction action)
     {
         var confirmed = TryReadRepriceSlot(InventoryManager.Instance(), action, out var price) && price == action.UnitPrice;
+        if (confirmed && Mode == ExecutionMode.FullCycle)
+            baitMatches.Consume(action.ItemId, action.IsHQ);
         if (!confirmed)
         {
             waitingSince ??= DateTime.UtcNow;
@@ -1147,6 +1163,15 @@ public sealed unsafe class Executor : IDisposable
             // history row. Only the log notes that the live read did not confirm it.
             log.Warning($"[Restocker] reprice not confirmed by live read for {action.RetainerKey} slot={action.ListingIndex} item={action.ItemId} hq={action.IsHQ}; counting as applied");
             price = action.UnitPrice;
+        }
+
+        if (action.BypassedMaxDrop)
+        {
+            var sheet = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Item>();
+            var name = sheet.TryGetRow(action.ItemId, out var row) ? row.Name.ExtractText() : $"#{action.ItemId}";
+            if (action.IsHQ) name += " (HQ)";
+            var drop = -RepriceRules.ChangePercent(action.OldPrice, price);
+            Plugin.ChatPrint(string.Format(Localization.Strings.BaitMatchMaxDrop, name, drop));
         }
 
         if (configuration.Snapshots.TryGetValue(action.RetainerKey, out var snapshot)

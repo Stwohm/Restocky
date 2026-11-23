@@ -339,6 +339,7 @@ public sealed class RepriceTab
         var sheet = Plugin.DataManager.GetExcelSheet<Item>();
 
         var settings = configuration.ToRepriceSettings(undercut);
+        var baitPrices = executor.LastBaitPricesFor(snap.Key);
         Plugin.Log.Information($"[Restocker] reprice apply: retainer={snap.RetainerName} listings={snap.Listings.Count} undercut={undercut}");
 
         foreach (var listing in snap.Listings)
@@ -347,6 +348,8 @@ public sealed class RepriceTab
             if (listing.IsHQ) name += " (HQ)";
             if (filter.Length > 0 && !name.Contains(filter, System.StringComparison.OrdinalIgnoreCase)) continue;
 
+            var baitKey = (listing.ListingIndex, listing.ItemId, listing.IsHQ);
+            baitPrices.Remove(baitKey);
             seen.Add((listing.ItemId, listing.IsHQ));
             if (respectHold && configuration.IsHeld(listing.ItemId, listing.IsHQ))
             {
@@ -372,9 +375,13 @@ public sealed class RepriceTab
             var dropped = BaitFinder.Dropped(offers, lowest);
             if (dropped.Count > 0)
             {
+                baitPrices[baitKey] = dropped[0].Price;
                 var notice = new BaitNotice(listing.ItemId, listing.IsHQ, snap.RetainerName, dropped, lowest);
                 if (reportedBaits.Add(BaitFinder.Key(notice)))
-                    Plugin.ChatPrint(BaitFinder.Format(sheet.TryGetRow(listing.ItemId, out var br) ? br.Name.ExtractText() : $"#{listing.ItemId}", notice));
+                {
+                    var itemName = sheet.TryGetRow(listing.ItemId, out var br) ? br.Name.ExtractText() : $"#{listing.ItemId}";
+                    Plugin.Instance.PrintBaitMatchLink(BaitFinder.Format(itemName, notice), itemName, notice);
+                }
             }
             if (lowest <= 0)
             {
@@ -482,7 +489,9 @@ public sealed class RepriceTab
         ImGui.TableSetupColumn(Strings.ColProfit, fixedNoSort, 75);
         ImGui.TableSetupColumn(Strings.ColHold, fixedNoSort, 55);
         ImGui.TableSetupColumn("##fill", fixedNoSort, 70);
-        ImGui.TableSetupColumn("##add", fixedNoSort, 60);
+        var baitPrices = executor.LastBaitPricesFor(snap.Key);
+        var addWidth = baitPrices.Count > 0 ? ImGui.CalcTextSize(Strings.MatchBait).X + 2 * ImGui.GetStyle().FramePadding.X : 0;
+        ImGui.TableSetupColumn("##add", fixedNoSort, Math.Max(60, addWidth));
         ImGui.TableHeadersRow();
 
         // Fork: sort the filtered display rows while keeping the original listing entries and slot keys.
@@ -524,7 +533,7 @@ public sealed class RepriceTab
             ImGui.TableNextColumn();
             DrawFillButton(snap, l);
             ImGui.TableNextColumn();
-            DrawAddPlanButton(snap, l, name);
+            DrawAddPlanButton(snap, l, name, baitPrices.GetValueOrDefault((l.ListingIndex, l.ItemId, l.IsHQ)));
         }
 
         ImGui.EndTable();
@@ -787,9 +796,21 @@ public sealed class RepriceTab
         ImGui.EndTooltip();
     }
 
-    private void DrawAddPlanButton(RetainerSnapshot snap, ListingEntry l, string name)
+    private void DrawAddPlanButton(RetainerSnapshot snap, ListingEntry l, string name, long bait)
     {
         var key = EditKey(snap.Key, l);
+        if (bait > 0)
+        {
+            if (ImGui.SmallButton($"{Strings.MatchBait}##bait-{key}"))
+            {
+                var floor = configuration.EffectiveFloorFor(l.ItemId, l.IsHQ, costLedger);
+                var decision = RepriceRules.Decide(l.UnitPrice, [bait], floor.Price,
+                    configuration.ToRepriceSettings(), includeBait: true);
+                editedPrice[key] = (decision.NewPrice, floor.FromCost && decision.Reason == RepriceReason.Floor);
+                RemovePlanIfExists(snap.Key, l.ListingIndex);
+            }
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.MatchBaitPrefill);
+        }
         var (price, clampedToFloor) = editedPrice.GetValueOrDefault(key);
         var canAdd = price > 0 && price != l.UnitPrice;
 

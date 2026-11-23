@@ -42,6 +42,7 @@ public sealed class PlannedAction
     public long LowestCompetitor { get; set; }
 
     public Restocker.Market.RepriceReason Reason { get; set; } = Restocker.Market.RepriceReason.Manual;
+    internal bool BypassedMaxDrop { get; set; }
 
     /// <summary>Competitor retainers below our old price when planned, ';'-separated.</summary>
     public string Undercutters { get; set; } = string.Empty;
