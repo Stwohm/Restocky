@@ -27,7 +27,7 @@ namespace Restocker.Execution;
 /// 個別アクションを処理するパスがあるが、価格セットや qty セットの addon 操作は
 /// addon 構造体の AskingPrice / Quantity を直接叩く方式で書いている (Marketbuddy 流)。
 /// </summary>
-public sealed unsafe class Executor : IDisposable
+public sealed unsafe partial class Executor : IDisposable
 {
     private readonly IFramework framework;
     private readonly IPluginLog log;
@@ -57,6 +57,7 @@ public sealed unsafe class Executor : IDisposable
     private bool partialFirstVisit;
     private RetainerVisitJob CurrentJob => jobs[jobCursor];
     private readonly List<RetainerVisitJob> jobs = new();
+    private bool HasTopUps => jobs.Any(j => j.Actions.Any(a => a.TopUp != null));
     private int jobCursor;
     private readonly HashSet<string> historyRequested = new();
     private string? historyRetainerKey;
@@ -281,6 +282,7 @@ public sealed unsafe class Executor : IDisposable
     private sealed class Handover
     {
         public required string RetainerName { get; init; }
+        public required PlannedAction First { get; init; }
         public required uint ItemId { get; init; }
         public required bool IsHq { get; init; }
         public required int Quantity { get; init; }
@@ -312,6 +314,7 @@ public sealed unsafe class Executor : IDisposable
         handover = new Handover
         {
             RetainerName = snap.RetainerName,
+            First = first,
             ItemId = first.ItemId,
             IsHq = first.IsHQ,
             Quantity = first.Quantity,
@@ -340,23 +343,28 @@ public sealed unsafe class Executor : IDisposable
         var im = InventoryManager.Instance();
         if (im == null) { FailHandover("inventory not available"); return; }
 
+        if (ActiveRetainerKey() != h.First.RetainerKey || !AddonHelper.IsOpen("RetainerSellList"))
+        {
+            FailHandover(Strings.StockHandoverUnavailable);
+            return;
+        }
         h.SlotsBefore.Clear();
         foreach (var l in ReadLiveListings()) h.SlotsBefore.Add(l.Slot);
-
-        InventoryType[] order =
+        var market = im->GetInventoryContainer(InventoryType.RetainerMarket);
+        if (market == null || !market->IsLoaded || h.SlotsBefore.Count >= Planner.MaxListingSlots)
         {
-            InventoryType.Inventory1, InventoryType.Inventory2, InventoryType.Inventory3, InventoryType.Inventory4,
-            InventoryType.RetainerPage1, InventoryType.RetainerPage2, InventoryType.RetainerPage3,
-            InventoryType.RetainerPage4, InventoryType.RetainerPage5, InventoryType.RetainerPage6, InventoryType.RetainerPage7,
-        };
-        foreach (var t in order)
+            FailHandover(Strings.StockNoMarketSlot);
+            return;
+        }
+
+        foreach (var t in SourceContainersFor(h.First.SourceKey))
         {
             var c = im->GetInventoryContainer(t);
-            if (c == null) continue;
+            if (c == null || !c->IsLoaded) continue;
             for (var i = 0; i < c->Size; i++)
             {
                 var it = c->GetInventorySlot(i);
-                if (it == null || it->ItemId != h.ItemId) continue;
+                if (it == null || it->ItemId != h.ItemId || it->Quantity < h.Quantity) continue;
                 if (((it->Flags & InventoryItem.ItemFlags.HighQuality) != 0) != h.IsHq) continue;
                 var agent = FFXIVClientStructs.FFXIV.Client.UI.Agent.AgentInventoryContext.Instance();
                 if (agent == null) { FailHandover("inventory context not available"); return; }
@@ -372,7 +380,7 @@ public sealed unsafe class Executor : IDisposable
         }
 
         // Only in the saddlebag: move one stack to the bag first (saddlebag items have no sale entry).
-        if (!h.Staged && StageOneSaddleSlot(h.ItemId, h.IsHq))
+        if (!h.Staged && h.First.SourceKey.EndsWith(".saddle") && StageOneSaddleSlot(h.ItemId, h.IsHq))
         {
             h.Staged = true;
             Wait(SaddleSettleAfterStage);
@@ -440,7 +448,7 @@ public sealed unsafe class Executor : IDisposable
     private void FailHandover(string why)
     {
         log.Warning($"[Restocker] handover failed: {why}");
-        Plugin.ChatPrint($"List & price: {why}. Nothing was listed.");
+        Plugin.ChatPrint(string.Format(Strings.StockHandoverFailed, why));
         FinishHandover(price: 0);
     }
 
@@ -460,7 +468,8 @@ public sealed unsafe class Executor : IDisposable
             runEta.SetWork(CurrentJob, work with { Listings = work.Listings + h.SameRetainerFollowUps.Count },
                 runClock.Elapsed, discovered: true);
         }
-        State = ExecutionState.PerformingAction;
+        State = currentJobActions.Any(RetainerVisitJob.UsesSaddle)
+            ? ExecutionState.PreStagingSaddle : ExecutionState.PerformingAction;
         Wait(TimeSpan.FromMilliseconds(500));
     }
 
@@ -469,17 +478,18 @@ public sealed unsafe class Executor : IDisposable
         if (IsRunning) { log.Warning("[Restocker] Executor.Start while already running"); return; }
         // RetainerKey ごとにグループ化、各リテイナー名を解決
         jobs.Clear();
-        foreach (var grp in actions.GroupBy(a => a.RetainerKey))
+        foreach (var group in RetainerVisitJob.GroupApplyActions(actions))
         {
-            if (!configuration.Snapshots.TryGetValue(grp.Key, out var snap))
+            var key = group[0].RetainerKey;
+            if (!configuration.Snapshots.TryGetValue(key, out var snap))
             {
-                log.Warning($"[Restocker] unknown retainer key in plan: {grp.Key}");
+                log.Warning($"[Restocker] unknown retainer key in plan: {key}");
                 continue;
             }
             jobs.Add(new RetainerVisitJob
             {
                 RetainerName = snap.RetainerName,
-                Actions = grp.OrderBy(a => a.Kind).ThenBy(a => a.ListingIndex).ToList(),
+                Actions = group,
             });
         }
         Begin(ExecutionMode.ApplyActions);
@@ -495,6 +505,8 @@ public sealed unsafe class Executor : IDisposable
         collectAutoRestock = mode == ExecutionMode.FullCycle && postprocessKey == null
             && configuration.AutoRestockDuringCycle && configuration.LowStock.Count > 0;
         autoRestockPass = false;
+        pendingTopUp = null;
+        unconfirmedTopUpItems.Clear();
         pendingReprice = null;
         autoRestockSnapshots.Clear();
         autoRestockResults.Clear();
@@ -539,7 +551,8 @@ public sealed unsafe class Executor : IDisposable
                 Stop("open the planned pricing retainer or return to the bell list");
                 return;
             }
-            if (RetainerVisitJob.StartAtActive(jobs, activeName))
+            if (jobs[0].RetainerName == activeName
+                || (!HasTopUps && RetainerVisitJob.StartAtActive(jobs, activeName)))
             {
                 partialFirstVisit = true;
                 EnterJob();
@@ -594,7 +607,8 @@ public sealed unsafe class Executor : IDisposable
     private void Tick(IFramework _)
     {
         if (!IsRunning) return;
-        if (cancelRequested) { Stop("cancelled"); return; }
+        // Give an in-flight withdrawal a chance to finish its relist before cancelling the run.
+        if (cancelRequested && pendingTopUp == null) { Stop("cancelled"); return; }
         if (DateTime.UtcNow < nextStepNoEarlierThan) return;
 
         try
@@ -638,6 +652,7 @@ public sealed unsafe class Executor : IDisposable
                 case ExecutionState.AwaitingSaddleMove: TickAwaitingSaddleMove(); break;
                 case ExecutionState.PreStagingSaddle: TickPreStagingSaddle(); break;
                 case ExecutionState.AwaitingNewListing: TickAwaitingNewListing(); break;
+                case ExecutionState.AwaitingTopUp: TickTopUp(); break;
                 case ExecutionState.FetchAwaitingSellDialog: TickFetchAwaitingSellDialog(); break;
                 case ExecutionState.FetchAwaitingMarketData: TickFetchAwaitingMarketData(); break;
                 case ExecutionState.FetchAwaitingSellListAfter: TickFetchAwaitingSellListAfter(); break;
@@ -655,6 +670,11 @@ public sealed unsafe class Executor : IDisposable
         catch (Exception ex)
         {
             log.Error(ex, "[Restocker] Executor tick exception");
+            if (pendingTopUp != null)
+            {
+                FailTopUp("exception during top-up");
+                return;
+            }
             Stop($"tick exception: {ex.GetType().Name}");
         }
     }
@@ -792,9 +812,13 @@ public sealed unsafe class Executor : IDisposable
             pendingStage = null;
         }
 
-        var canStage = !autoRestockPass || (AddonHelper.IsOpen("RetainerSellList") && currentJobActions.Peek().RetainerKey == ActiveRetainerKey());
-        var actions = autoRestockPass ? currentJobActions.Where(a => canStage && CanAutoRestock(a)) : currentJobActions;
-        var laterActions = autoRestockPass ? jobs.Skip(jobCursor + 1).SelectMany(j => j.Actions).Where(CanAutoRestock) : null;
+        var activeKey = AddonHelper.IsOpen("RetainerSellList") ? ActiveRetainerKey() : null;
+        var actions = currentJobActions.Where(a => !unconfirmedTopUpItems.Contains((a.ItemId, a.IsHQ))
+            && (!(a.StockRestock || a.TopUp != null) || a.RetainerKey == activeKey)
+            && (!autoRestockPass || CanAutoRestock(a)));
+        var laterActions = autoRestockPass || currentJobActions.Any(a => a.StockRestock || a.TopUp != null)
+            ? jobs.Skip(jobCursor + 1).SelectMany(j => j.Actions).Where(a => !autoRestockPass || CanAutoRestock(a))
+            : null;
         var needs = RestockPlanner.SaddleStagingNeeds(actions, laterActions);
 
         var im = InventoryManager.Instance();
@@ -870,7 +894,7 @@ public sealed unsafe class Executor : IDisposable
         foreach (var st in SaddleContainers)
         {
             var sc = im->GetInventoryContainer(st);
-            if (sc == null) continue;
+            if (sc == null || !sc->IsLoaded) continue;
             for (var si = 0; si < sc->Size; si++)
             {
                 var sit = sc->GetInventorySlot(si);
@@ -882,7 +906,7 @@ public sealed unsafe class Executor : IDisposable
                 foreach (var bt in CharBagContainers)
                 {
                     var bc = im->GetInventoryContainer(bt);
-                    if (bc == null) continue;
+                    if (bc == null || !bc->IsLoaded) continue;
                     for (var bi = 0; bi < bc->Size; bi++)
                     {
                         var bit = bc->GetInventorySlot(bi);
@@ -1215,6 +1239,9 @@ public sealed unsafe class Executor : IDisposable
         runEta!.StartAction(runClock.Elapsed);
         switch (action.Kind)
         {
+            case PlannedActionKind.TopUp:
+                StartTopUp(action);
+                return;
             case PlannedActionKind.FetchMarketPrice:
                 // Fork: fetch rows live in FetchRowQueue now; a queued FetchMarketPrice is a no-op.
                 currentJobActions.Dequeue();
@@ -1276,7 +1303,9 @@ public sealed unsafe class Executor : IDisposable
                     var sellList = AddonHelper.GetVisible("RetainerSellList");
                     var retLarge = AddonHelper.GetVisible("InventoryRetainerLarge");
                     log.Information($"[Restocker] NewListing: RetainerSellList visible={sellList != null}, InventoryRetainerLarge visible={retLarge != null}, item={action.ItemId} hq={action.IsHQ} qty={action.Quantity} price={action.UnitPrice} src={action.SourceKey}");
-                    if (sellList == null || (autoRestockPass && (!CanAutoRestock(action) || ActiveRetainerKey() != action.RetainerKey)))
+                    if (sellList == null || (action.StockRestock && ActiveRetainerKey() != action.RetainerKey)
+                        || unconfirmedTopUpItems.Contains((action.ItemId, action.IsHQ))
+                        || (autoRestockPass && !CanAutoRestock(action)))
                     {
                         log.Warning("[Restocker] NewListing: sell list, target retainer, or auto-restock settings no longer permit listing");
                         currentJobActions.Dequeue();
@@ -1605,7 +1634,7 @@ public sealed unsafe class Executor : IDisposable
         // usedMarketSlots に入っているスロットは「ついさっき使った」のでサーバ反映前
         // でもターゲットしないことで swap 動作を防ぐ。
         var market = im->GetInventoryContainer(InventoryType.RetainerMarket);
-        if (market == null || (autoRestockPass && !market->IsLoaded)) return false;
+        if (market == null || (action.StockRestock && !market->IsLoaded)) return false;
         var dstSlot = -1;
         for (var i = 0; i < Math.Min(market->Size, Planner.MaxListingSlots); i++)
         {
@@ -1617,12 +1646,13 @@ public sealed unsafe class Executor : IDisposable
         if (dstSlot < 0) { log.Warning("[Restocker] no free RetainerMarket slot"); return false; }
 
         var sourceKey = string.IsNullOrEmpty(action.SourceKey) ? action.RetainerKey : action.SourceKey;
-        var candidates = autoRestockPass ? SourceContainersFor(sourceKey) : ResolveSearchOrder(sourceKey);
+        var candidates = autoRestockPass || (action.StockRestock && HasTopUps)
+            ? SourceContainersFor(sourceKey) : ResolveSearchOrder(sourceKey);
 
         foreach (var t in candidates)
         {
             var c = im->GetInventoryContainer(t);
-            if (c == null || (autoRestockPass && !c->IsLoaded)) continue;
+            if (c == null || (action.StockRestock && !c->IsLoaded)) continue;
             for (var i = 0; i < c->Size; i++)
             {
                 var item = c->GetInventorySlot(i);
@@ -2041,7 +2071,7 @@ public sealed unsafe class Executor : IDisposable
         {
             var hq = (slot->Flags & InventoryItem.ItemFlags.HighQuality) != 0;
             var action = currentJobActions.Peek();
-            if (hq == pendingListingIsHQ && (!autoRestockPass || (ActiveRetainerKey() == action.RetainerKey
+            if (hq == pendingListingIsHQ && (!action.StockRestock || (ActiveRetainerKey() == action.RetainerKey
                 && im->GetRetainerMarketPrice((short)pendingListingSlot) == (ulong)action.UnitPrice)))
             {
                 listedRetainerKey = action.RetainerKey;
@@ -2356,6 +2386,7 @@ public sealed unsafe class Executor : IDisposable
         foreach (var group in plans.SelectMany(p => p.Actions).GroupBy(a => a.RetainerKey))
         {
             var actions = group.ToList();
+            PrintPreferredRetainerFallbacks(actions);
             var job = new RetainerVisitJob { RetainerName = autoRestockSnapshots[group.Key].RetainerName, Actions = actions };
             jobs.Add(job);
             runEta!.SetWork(job, RunEtaWork.ForJob(job, runEta.Timings, [], configuration.IsHeld),
@@ -2364,6 +2395,17 @@ public sealed unsafe class Executor : IDisposable
         }
         autoRestockPass = jobCursor < jobs.Count;
         return autoRestockPass;
+    }
+
+    internal void PrintPreferredRetainerFallbacks(IEnumerable<PlannedAction> actions)
+    {
+        foreach (var action in actions.Where(a => a.PreferredRetainerFallback != null)
+            .DistinctBy(a => (a.ItemId, a.IsHQ, a.RetainerKey)))
+        {
+            if (!configuration.Snapshots.TryGetValue(action.RetainerKey, out var retainer)) continue;
+            Plugin.ChatPrint(string.Format(Strings.PreferredRetainerFallback,
+                AutoRestockItemName(action.ItemId, action.IsHQ), action.PreferredRetainerFallback, retainer.RetainerName));
+        }
     }
 
     private long AutoRestockFloor(uint itemId, bool hq) => configuration.EffectiveFloorFor(itemId, hq, costLedger).Price;

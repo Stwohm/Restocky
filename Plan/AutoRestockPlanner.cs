@@ -60,7 +60,8 @@ internal static class AutoRestockPlanner
             }
             var actions = RestockPlanner.Plan(itemId, hq, entry.Target, listedUnits,
                 RestockPlanner.PerListing(entry, existing.Select(l => l.Quantity)), price, sources, free,
-                tracker.PreferredRetainers(itemId, hq, keys));
+                tracker.PreferredRetainers(itemId, hq, keys),
+                entry.PreferredRetainers.GetValueOrDefault(owner.CharacterContentId), retainers);
             if (actions.Count == 0) continue;
             foreach (var action in actions) free[action.RetainerKey]--;
             plans.Add(new AutoRestockPlan(itemId, hq, kind, actions));

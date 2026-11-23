@@ -64,7 +64,7 @@ public sealed class MainWindow : Window, IDisposable
             }
             var lowCount = Plugin.Instance.LowStock.LowItems().Count;
             if (lowCount > 0) ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.55f, 0.4f, 1f));
-            var lowOpen = ImGui.BeginTabItem(lowCount > 0 ? $"Low stock ({lowCount})###lowstock" : "Low stock###lowstock");
+            var lowOpen = ImGui.BeginTabItem(lowCount > 0 ? $"{Strings.StockTracking} ({lowCount})###lowstock" : $"{Strings.StockTracking}###lowstock");
             if (lowCount > 0) ImGui.PopStyleColor();
             if (lowOpen)
             {
@@ -151,7 +151,7 @@ public sealed class MainWindow : Window, IDisposable
             var sheet = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Item>();
             var text = string.Join(", ", low.Select(x =>
                 $"{(sheet.TryGetRow(x.Entry.ItemId, out var row) ? row.Name.ExtractText() : $"#{x.Entry.ItemId}")}{(x.Entry.IsHq ? " (HQ)" : "")} {x.Listed}"));
-            ImGui.TextColored(new Vector4(1f, 0.55f, 0.4f, 1f), $"Low stock: {text}");
+            ImGui.TextColored(new Vector4(1f, 0.55f, 0.4f, 1f), $"{Strings.StockTracking}: {text}");
         }
 
         // 直近の停止理由を見える化
@@ -323,6 +323,13 @@ public sealed class MainWindow : Window, IDisposable
             configuration.Save();
         }
         if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.AutoRetainerPostprocessHint);
+
+        var topUp = configuration.TopUpPartialStacksOnRestock;
+        if (ImGui.Checkbox(Strings.TopUpPartialStacks, ref topUp))
+        {
+            configuration.TopUpPartialStacksOnRestock = topUp;
+            configuration.Save();
+        }
 
         var autoRestock = configuration.AutoRestockDuringCycle;
         if (ImGui.Checkbox(Strings.AutoRestockSetting, ref autoRestock))

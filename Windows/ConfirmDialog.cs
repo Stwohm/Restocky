@@ -70,6 +70,8 @@ public sealed class ConfirmDialog
 
         ImGui.TextUnformatted(string.Format(Strings.ConfirmTitle, actions.Count, retainers));
         ImGui.TextUnformatted(string.Format(Strings.ConfirmBreakdown, reprice, newListing));
+        var topUps = actions.Count(a => a.Kind == PlannedActionKind.TopUp);
+        if (topUps > 0) ImGui.TextUnformatted(string.Format(Strings.TopUpCount, topUps));
         ImGui.TextUnformatted(string.Format(Strings.ConfirmEta, estimateSec));
     }
 
@@ -102,8 +104,21 @@ public sealed class ConfirmDialog
                         ImGui.PopStyleColor();
                     }
                 }
+                else if (a.TopUp is { } topUp)
+                {
+                    ImGui.Bullet();
+                    ImGui.TextWrapped(string.Format(Strings.TopUpPlan, name, topUp.OriginalQuantity, a.Quantity, a.UnitPrice, retainerName));
+                }
                 else
+                {
                     ImGui.BulletText($"{name} ×{a.Quantity} @ {a.UnitPrice:N0} g");
+                }
+            }
+            foreach (var a in grp.Where(a => a.PreferredRetainerFallback != null).DistinctBy(a => (a.ItemId, a.IsHQ)))
+            {
+                var name = sheet.TryGetRow(a.ItemId, out var row) ? row.Name.ExtractText() : $"#{a.ItemId}";
+                if (a.IsHQ) name += " (HQ)";
+                ImGui.TextWrapped(string.Format(Strings.PreferredRetainerFallback, name, a.PreferredRetainerFallback, retainerName));
             }
             ImGui.Unindent();
         }

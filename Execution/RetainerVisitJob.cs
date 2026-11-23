@@ -22,7 +22,34 @@ public sealed class RetainerVisitJob
     /// <summary>Fork: after fetching, plan Reprice actions with the price rules and run them.</summary>
     public bool AutoPlan { get; init; }
 
-    internal bool NeedsSaddleStaging => Actions.Any(a => a.Kind == PlannedActionKind.NewListing && a.SourceKey.EndsWith(".saddle"));
+    internal bool NeedsSaddleStaging => Actions.Any(UsesSaddle);
+
+    internal static bool UsesSaddle(PlannedAction action) => action.TopUp is { SaddleUnits: > 0 }
+        || (action.Kind == PlannedActionKind.NewListing && action.SourceKey.EndsWith(".saddle"));
+
+    internal static List<List<PlannedAction>> GroupApplyActions(IEnumerable<PlannedAction> actions)
+    {
+        var plan = actions.ToList();
+        var visits = new List<List<PlannedAction>>();
+        // Top up the largest stacks first, before any new listing can use the remaining stock.
+        foreach (var action in plan.Where(a => a.TopUp != null).OrderByDescending(a => a.TopUp!.OriginalQuantity))
+        {
+            if (visits.Count == 0 || visits[^1][0].RetainerKey != action.RetainerKey)
+                visits.Add(new List<PlannedAction>());
+            visits[^1].Add(action);
+        }
+
+        var lastTopUpVisit = visits.LastOrDefault();
+        foreach (var group in plan.Where(a => a.TopUp == null).GroupBy(a => a.RetainerKey))
+        {
+            var ordered = group.OrderBy(a => a.Kind).ThenBy(a => a.ListingIndex);
+            if (lastTopUpVisit != null && lastTopUpVisit[0].RetainerKey == group.Key)
+                lastTopUpVisit.AddRange(ordered);
+            else
+                visits.Add(ordered.ToList());
+        }
+        return visits;
+    }
 
     internal static bool StartAtActive(List<RetainerVisitJob> jobs, string? activeName)
     {

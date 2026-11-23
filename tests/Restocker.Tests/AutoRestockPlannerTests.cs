@@ -203,6 +203,30 @@ public class AutoRestockPlannerTests
     }
 
     [Fact]
+    public void Cycle_uses_the_current_characters_sell_on_preference_and_only_creates_new_listings()
+    {
+        var a = Retainer("A", Listed(Twine, 74, 100));
+        var b = Retainer("B");
+        a.RetainerName = "Other";
+        b.RetainerName = "RetainerA";
+        var entry = new LowStockEntry
+        {
+            ItemId = Twine, Threshold = 74, Target = 76, PerListing = 1,
+            PreferredRetainers = new() { [1] = "RetainerA", [2] = "Other" },
+        };
+        var character = new CharacterSnapshot { CharacterContentId = 1, Bag = [Stock(Twine, 2)] };
+        var result = Assert.Single(Plan([entry], [a, b], character: character));
+
+        Assert.Equal(2, result.Actions.Count);
+        Assert.All(result.Actions, action =>
+        {
+            Assert.Equal("B", action.RetainerKey);
+            Assert.Equal(PlannedActionKind.NewListing, action.Kind);
+            Assert.Null(action.TopUp);
+        });
+    }
+
+    [Fact]
     public void Reuses_retainer_bag_and_saddle_sources_without_combining_inventory_stacks()
     {
         var a = Retainer("A");

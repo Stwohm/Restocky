@@ -20,6 +20,12 @@ public sealed class LowStockEntry
 {
     public uint ItemId { get; set; }
     public bool IsHq { get; set; }
+    public Dictionary<ulong, string> PreferredRetainers { get; set; } = new();
+    public StockKind Kind { get; set; }
+    public StockStatus Status { get; set; }
+
+    internal bool MatchesTags(StockKind kind, StockStatus status)
+        => (kind == StockKind.None || Kind == kind) && (status == StockStatus.None || Status == status);
 
     /// <summary>Notify when listed units are at or below this.</summary>
     public int Threshold { get; set; } = 1;
@@ -33,6 +39,9 @@ public sealed class LowStockEntry
     /// <summary>Price for new listings; 0 = our current listing price, else market lowest - undercut.</summary>
     public long Price { get; set; }
 }
+
+public enum StockKind { None, Flip, Gather, Craft }
+public enum StockStatus { None, Regular, Trial }
 
 /// <summary>
 /// Fork: tops up the units listed for one item to a target, pulling from retainer inventories
@@ -50,7 +59,9 @@ public static class RestockPlanner
         long unitPrice,
         IReadOnlyList<RestockSource> sources,
         IReadOnlyDictionary<string, int> freeSlotsByRetainer,
-        IReadOnlyList<string>? preferredRetainers = null)
+        IReadOnlyList<string>? preferredRetainers = null,
+        string? sellOn = null,
+        IReadOnlyCollection<RetainerSnapshot>? retainers = null)
     {
         var preferred = preferredRetainers ?? Array.Empty<string>();
         var result = new List<PlannedAction>();
@@ -58,30 +69,32 @@ public static class RestockPlanner
         if (need <= 0 || unitPrice <= 0) return result;
         perListing = Math.Max(1, perListing);
         var free = freeSlotsByRetainer.ToDictionary(p => p.Key, p => p.Value);
+        var preferredKey = sellOn == null ? null : retainers?.FirstOrDefault(r => r.RetainerName == sellOn)?.Key;
+        var remaining = sources.Select(s => s.Available).ToArray();
 
         // Preferred retainers (the ones that already sell this item) list first:
         //   0 their own inventory, 1 bag -> them, 2 saddlebag -> them,
         //   3 other retainers' own inventory, 4 bag, 5 saddlebag -> retainer with most free slots.
-        var preferredHasRoom = preferred.Any(p => free.TryGetValue(p, out var n) && n > 0);
         int Rank(RestockSource s)
         {
             if (s.FixedTargetKey != null) return preferred.Contains(s.FixedTargetKey) ? 0 : 3;
             var saddle = s.SourceKey.EndsWith(".saddle") ? 1 : 0;
-            return (preferredHasRoom ? 1 : 4) + saddle;
+            return (preferred.Any(HasRoom) ? 1 : 4) + saddle;
         }
-        var ordered = sources.OrderBy(Rank).ToList();
 
-        foreach (var src in ordered)
+        bool HasRoom(string key) => free.TryGetValue(key, out var n) && n > 0;
+
+        void AddListings(int index, string? forcedTarget)
         {
-            var avail = src.Available;
-            while (need > 0 && avail > 0)
+            var src = sources[index];
+            while (need > 0 && remaining[index] > 0)
             {
-                var target = src.FixedTargetKey
-                    ?? preferred.FirstOrDefault(p => free.TryGetValue(p, out var n) && n > 0)
+                var target = forcedTarget ?? src.FixedTargetKey
+                    ?? preferred.FirstOrDefault(HasRoom)
                     ?? free.Where(p => p.Value > 0).OrderByDescending(p => p.Value).Select(p => p.Key).FirstOrDefault();
-                if (target == null || !free.TryGetValue(target, out var slots) || slots <= 0) break;
+                if (target == null || !HasRoom(target)) break;
 
-                var qty = Math.Min(Math.Min(perListing, src.MaxPerListing), Math.Min(need, avail));
+                var qty = Math.Min(Math.Min(perListing, src.MaxPerListing), Math.Min(need, remaining[index]));
                 result.Add(new PlannedAction
                 {
                     Kind = PlannedActionKind.NewListing,
@@ -91,11 +104,26 @@ public static class RestockPlanner
                     IsHQ = isHq,
                     Quantity = qty,
                     UnitPrice = unitPrice,
+                    PreferredRetainerFallback = target == preferredKey ? null : sellOn,
+                    StockRestock = true,
                 });
-                free[target] = slots - 1;
+                free[target]--;
                 need -= qty;
-                avail -= qty;
+                remaining[index] -= qty;
             }
+        }
+
+        var indices = Enumerable.Range(0, sources.Count);
+        if (preferredKey != null && HasRoom(preferredKey))
+        {
+            foreach (var i in indices.Where(i => sources[i].FixedTargetKey == null || sources[i].FixedTargetKey == preferredKey)
+                .OrderBy(i => sources[i].FixedTargetKey != null ? 0 : sources[i].SourceKey.EndsWith(".saddle") ? 2 : 1))
+                AddListings(i, preferredKey);
+        }
+
+        foreach (var i in indices.OrderBy(i => Rank(sources[i])))
+        {
+            AddListings(i, null);
             if (need <= 0) break;
         }
         return result;
@@ -117,14 +145,14 @@ public static class RestockPlanner
                 .GroupBy(a => (a.ItemId, a.IsHQ)).ToDictionary(g => g.Key, g => g.Sum(a => a.Quantity));
 
         // When an item uses the saddlebag, reserve enough in the bag for both sources.
-        var needs = actions.Where(a => a.Kind == PlannedActionKind.NewListing && a.SourceKey.StartsWith("char."))
+        var needs = actions.Where(a => a.TopUp != null || (a.Kind == PlannedActionKind.NewListing && a.SourceKey.StartsWith("char.")))
             .GroupBy(a => (a.ItemId, a.IsHQ))
-            .Where(g => g.Any(a => a.SourceKey.EndsWith(".saddle")))
-            .ToDictionary(g => g.Key, g => g.Sum(a => a.Quantity));
-        foreach (var action in laterActions.Where(a => a.Kind == PlannedActionKind.NewListing && a.SourceKey.EndsWith(".bag")))
+            .Where(g => g.Any(a => a.TopUp is { SaddleUnits: > 0 } || a.SourceKey.EndsWith(".saddle")))
+            .ToDictionary(g => g.Key, g => g.Sum(a => a.TopUp is { } topUp ? topUp.BagUnits + topUp.SaddleUnits : a.Quantity));
+        foreach (var action in laterActions.Where(a => a.TopUp != null || (a.Kind == PlannedActionKind.NewListing && a.SourceKey.EndsWith(".bag"))))
         {
             var key = (action.ItemId, action.IsHQ);
-            if (needs.TryGetValue(key, out var need)) needs[key] = need + action.Quantity;
+            if (needs.TryGetValue(key, out var need)) needs[key] = need + (action.TopUp?.BagUnits ?? action.Quantity);
         }
         return needs;
     }

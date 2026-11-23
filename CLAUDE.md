@@ -18,7 +18,7 @@ Fork changes and where they live:
 - **Market data.** `MarketWatcher` keeps every competitor price (upstream kept only the first, so
   the outlier filter never ran) and records an empty scan for "no competitor". Each scan exposes sorted HQ, NQ and combined offers.
   Match quality defaults on (same quality). Per-item HQ and NQ overrides apply before bait filtering,
-  manual prefill, Low stock market suggestions and new rival observations. `MarketCache` has
+  manual prefill, Stock tracking market suggestions and new rival observations. `MarketCache` has
   update timestamps; a fetch only accepts data newer than its ComparePrices click.
 - **Rules** (`Market/RepriceRules.cs`, tested). Keep a low outlier group when our listing price is
   positive and at most the group's highest price times the gap ratio (default 1.5). Only dropped
@@ -31,15 +31,29 @@ Fork changes and where they live:
   cycle at the bell, never persisted, stops on leave bell / move / combat / duty / cutscene /
   zone / duty pop / user cancel / N failures, always prints the reason to chat.
 - This deliberately relaxes upstream's "only write game state behind Apply + confirm" rule for the
-  two cycle paths. With **Auto-restock low stock during Full/Auto cycle** enabled (off by default),
+  two cycle paths. With **Auto-restock tracked stock during Full/Auto cycle** enabled (off by default),
   the same exception covers new listings in one restock pass after all retainers have been repriced.
-  Low Stock thresholds and targets count units across the current character's retainers. The pass
+  Stock tracking thresholds and targets count units across the current character's retainers. The pass
   uses refreshed listings to plan quantities and free slots once, skips held item+quality pairs,
   and uses the existing listing executor and saddlebag pacing. Pricing uses the lowest current
   same-quality listing we own, then a same-quality market scan younger than the configured limit
   (6 hours by default), then the last recorded same-quality sale. The effective floor applies to
-  all prices. Manual Apply keeps its confirm dialog, and the Low Stock price handover uses the
+  all prices. Manual Apply keeps its confirm dialog, and the Stock tracking price handover uses the
   game's confirmation.
+- **Stack top-ups** (`Plan/StackTopUpPlanner.cs`, tested, and `Execution/Executor.TopUp.cs`):
+  manual Restock only, enabled by default, with the existing confirm dialog. Plan the largest
+  eligible partial stack first, at its current unit price and on its existing retainer. Top-ups can
+  go past the new-listing target. Reserve the inventory units before planning new listings. Stage
+  saddle stock with the existing 3s settle. Verify the live server slot (item, quality, count and
+  price), withdraw to the character bag using `MoveFromRetainerMarketToPlayerInventory`, verify
+  the empty slot and bag increase, and combine with `MoveItemSlot(..., true)`. Re-list in the same
+  slot and verify the price, quantity and bag decrement. A failed relist leaves withdrawn units
+  available for recovery, reports their location and skips dependent rows. Cycles only add new
+  listings.
+- **Sell on** (`Plan/RestockPlanner.cs`, tested): save the chosen retainer name per character on
+  each item+quality watch entry. Manual Restock, List & price and cycle restock use that retainer's
+  available slots for new listings before using Auto, and report fallback in the plan or chat.
+  Retainer inventory remains local to its owner. Top-ups keep the original listing's retainer.
 - **Dialog item names** (`Common/DialogItemName.cs`, tested): node text is decoded as a SeString.
   Raw bytes leaked macro remnants ("...Materia VIH") and the substring fallback picked the next
   materia tier, so the market answer was ignored and the row timed out.

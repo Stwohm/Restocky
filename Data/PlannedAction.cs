@@ -33,6 +33,10 @@ public sealed class PlannedAction
     /// </summary>
     public string SourceKey { get; set; } = string.Empty;
 
+    internal string? PreferredRetainerFallback { get; init; }
+    internal bool StockRestock { get; init; }
+    internal Restocker.Plan.StackTopUp? TopUp { get; init; }
+
     // ---- Fork: price-history context for Reprice actions (not persisted) ----
 
     /// <summary>Asking price when the plan was made.</summary>
@@ -62,4 +66,6 @@ public enum PlannedActionKind
     /// マーケット相場を取得しキャッシュに入れる。価格変更は行わない。
     /// </summary>
     FetchMarketPrice,
+
+    TopUp,
 }

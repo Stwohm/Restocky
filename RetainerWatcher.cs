@@ -146,7 +146,7 @@ public sealed unsafe class RetainerWatcher : IDisposable
     /// 99/listing が上限なので、stack size がそれ以上の物（999 stack の crystal 等）も
     /// 99 にクリップする。
     /// </summary>
-    private static int ResolveMaxListingStack(Item row)
+    internal static int ResolveMaxListingStack(Item row)
     {
         var inventoryStack = (int)row.StackSize;
         if (inventoryStack <= 0) return 1;

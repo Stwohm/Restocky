@@ -2,7 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using Dalamud.Plugin.Services;
+using FFXIVClientStructs.FFXIV.Client.Game;
 using Restocker.Data;
+using Restocker.Localization;
 using Restocker.Market;
 
 namespace Restocker.Plan;
@@ -81,15 +83,15 @@ public sealed class LowStockService : IDisposable
         var list = new List<RestockSource>();
         foreach (var s in MyRetainers())
         {
-            var n = s.Inventory.Where(e => e.ItemId == itemId && e.IsHQ == hq).Sum(e => e.Quantity);
+            var n = s.Inventory.Where(e => e.IsListable && e.ItemId == itemId && e.IsHQ == hq).Sum(e => e.Quantity);
             if (n > 0) list.Add(new RestockSource(s.Key, s.Key, n));
         }
         if (configuration.Characters.TryGetValue(CharacterSnapshot.MakeKey(Cid()), out var ch))
         {
             var prefix = CharacterSnapshot.MakeKey(ch.CharacterContentId);
-            var bag = ch.Bag.Where(e => e.ItemId == itemId && e.IsHQ == hq).Sum(e => e.Quantity);
+            var bag = ch.Bag.Where(e => e.IsListable && e.ItemId == itemId && e.IsHQ == hq).Sum(e => e.Quantity);
             if (bag > 0) list.Add(new RestockSource(prefix + ".bag", null, bag));
-            var saddle = ch.Saddlebag.Concat(ch.PremiumSaddlebag).Where(e => e.ItemId == itemId && e.IsHQ == hq).Sum(e => e.Quantity);
+            var saddle = ch.Saddlebag.Concat(ch.PremiumSaddlebag).Where(e => e.IsListable && e.ItemId == itemId && e.IsHQ == hq).Sum(e => e.Quantity);
             if (saddle > 0) list.Add(new RestockSource(prefix + ".saddle", null, saddle));
         }
         return list;
@@ -106,11 +108,47 @@ public sealed class LowStockService : IDisposable
         return ours > 0 ? ApplyFloor(e, ours) : MarketSuggestion(e, ours);
     }
 
-    public List<PlannedAction> PlanRestock(LowStockEntry e, int targetUnits, long unitPrice)
+    internal unsafe string[] CurrentRetainerNames()
     {
-        var free = MyRetainers().ToDictionary(s => s.Key, s => Math.Max(0, Planner.MaxListingSlots - s.Listings.Count));
-        return RestockPlanner.Plan(e.ItemId, e.IsHq, targetUnits, ListedUnits(e.ItemId, e.IsHq),
-            PerListing(e), unitPrice, Sources(e.ItemId, e.IsHq), free, PreferredRetainers(e));
+        if (Cid() == 0) return [];
+        var manager = RetainerManager.Instance();
+        var names = new List<string>();
+        if (manager != null && manager->IsReady)
+            for (uint i = 0; i < manager->GetRetainerCount(); ++i)
+            {
+                var retainer = manager->GetRetainerBySortedIndex(i);
+                if (retainer != null && retainer->RetainerId != 0) names.Add(retainer->NameString);
+            }
+        return (names.Count > 0 ? names : MyRetainers().Select(r => r.RetainerName)).OrderBy(n => n).ToArray();
+    }
+
+    public List<PlannedAction> PlanRestock(LowStockEntry e, int targetUnits, long unitPrice, bool allowTopUps = true)
+    {
+        var cid = Cid();
+        if (cid == 0) return [];
+        var retainers = MyRetainers().ToList();
+        var sources = Sources(e.ItemId, e.IsHq);
+        var listed = ListedUnits(e.ItemId, e.IsHq);
+        var actions = new List<PlannedAction>();
+        if (allowTopUps && configuration.TopUpPartialStacksOnRestock && listed > 0 && sources.Count > 0
+            && Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Item>().TryGetRow(e.ItemId, out var row))
+        {
+            var active = tracker.ActiveFor(e.ItemId, e.IsHq).Where(r => r.MissingSinceUtc == null)
+                .ToLookup(r => (r.RetainerKey, r.Slot));
+            var floor = configuration.EffectiveFloorFor(e.ItemId, e.IsHq, costLedger).Price;
+            var listings = retainers.SelectMany(r => r.Listings
+                .Where(l => l.UnitPrice >= floor && active[(r.Key, l.ListingIndex)].Any(record => l.ItemId == record.ItemId
+                    && l.IsHQ == record.IsHq && l.Quantity == record.Quantity))
+                .Select(l => (r.Key, l)));
+            actions = StackTopUpPlanner.Plan(e.ItemId, e.IsHq, RetainerWatcher.ResolveMaxListingStack(row),
+                (int)row.StackSize, listings, sources);
+            listed += actions.Sum(a => a.TopUp!.AddedUnits);
+        }
+
+        var free = retainers.ToDictionary(s => s.Key, s => Math.Max(0, Planner.MaxListingSlots - s.Listings.Count));
+        actions.AddRange(RestockPlanner.Plan(e.ItemId, e.IsHq, targetUnits, listed, PerListing(e), unitPrice,
+            sources, free, PreferredRetainers(e), e.PreferredRetainers.GetValueOrDefault(cid), retainers));
+        return actions;
     }
 
     /// <summary>
@@ -171,7 +209,7 @@ public sealed class LowStockService : IDisposable
                 ? row.Name.ExtractText() : $"#{e.ItemId}";
             var avail = Sources(e.ItemId, e.IsHq).Sum(s => s.Available);
             Plugin.Log.Information($"[Restocker] low stock alert: {name} listed={listed} threshold={e.Threshold}");
-            Plugin.ChatPrint($"low stock: {name}{(e.IsHq ? " (HQ)" : "")}: {listed} listed (alert at ≤{e.Threshold}), {avail} available in retainers / bag / saddlebag. Restocky › Low stock to restock.");
+            Plugin.ChatPrint(string.Format(Strings.StockTrackingAlert, name + (e.IsHq ? " (HQ)" : ""), listed, e.Threshold, avail));
         }
     }
 }

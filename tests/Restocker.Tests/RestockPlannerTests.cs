@@ -53,6 +53,51 @@ public class RestockPlannerTests
         Assert.All(p, a => Assert.Equal("B", a.RetainerKey));
     }
 
+    [Theory]
+    [InlineData(2, new[] { "B", "B" })]
+    [InlineData(1, new[] { "B", "A" })]
+    [InlineData(0, new[] { "A", "A" })]
+    public void Sell_on_uses_the_selected_retainers_free_slots_then_falls_back_to_auto(int slots, string[] expected)
+    {
+        RestockSource[] sources = [new("A", "A", 3), new("char.1.bag", null, 3)];
+        RetainerSnapshot[] retainers = [new() { Key = "A", RetainerName = "Auto Seller" }, new() { Key = "B", RetainerName = "RetainerA" }];
+        var actions = RestockPlanner.Plan(Twine, false, 2, 0, 1, 1, sources, Free(b: slots), ["A"], "RetainerA", retainers);
+
+        Assert.Equal(expected, actions.Select(a => a.RetainerKey));
+        Assert.All(actions.Take(slots), a => Assert.Null(a.PreferredRetainerFallback));
+        Assert.All(actions.Skip(slots), a => Assert.Equal("RetainerA", a.PreferredRetainerFallback));
+    }
+
+    [Fact]
+    public void Sell_on_falls_back_when_selected_retainer_cannot_use_the_source_or_is_missing()
+    {
+        RestockSource[] sources = [new("A", "A", 3)];
+        RetainerSnapshot[] retainers = [new() { Key = "A", RetainerName = "Auto Seller" }, new() { Key = "B", RetainerName = "RetainerA" }];
+        foreach (var name in new[] { "RetainerA", "Unavailable" })
+        {
+            var action = Assert.Single(RestockPlanner.Plan(Twine, false, 1, 0, 1, 1, sources, Free(), ["A"], name, retainers));
+            Assert.Equal("A", action.RetainerKey);
+            Assert.Equal(name, action.PreferredRetainerFallback);
+        }
+    }
+
+    [Fact]
+    public void Stock_tags_are_optional_and_filter_independently_by_kind_and_status()
+    {
+        var entry = new LowStockEntry();
+        Assert.True(entry.MatchesTags(StockKind.None, StockStatus.None));
+        Assert.False(entry.MatchesTags(StockKind.Flip, StockStatus.None));
+        Assert.False(entry.MatchesTags(StockKind.None, StockStatus.Trial));
+        Assert.Empty(entry.PreferredRetainers);
+
+        entry.Kind = StockKind.Flip;
+        entry.Status = StockStatus.Trial;
+        Assert.True(entry.MatchesTags(StockKind.Flip, StockStatus.None));
+        Assert.True(entry.MatchesTags(StockKind.None, StockStatus.Trial));
+        Assert.False(entry.MatchesTags(StockKind.Flip, StockStatus.Regular));
+        Assert.False(entry.MatchesTags(StockKind.Gather, StockStatus.Trial));
+    }
+
     [Fact]
     public void Preferred_retainer_bag_beats_other_retainer_bag()
     {

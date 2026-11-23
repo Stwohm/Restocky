@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Restocker.Common;
 using Restocker.Execution;
@@ -18,6 +19,8 @@ public sealed class LowStockTab
     private readonly ConfirmDialog confirmDialog;
     private readonly LowStockService service;
     private string search = string.Empty;
+    private StockKind kindFilter;
+    private StockStatus statusFilter;
     private readonly Dictionary<(uint, bool), int> restockTo = new();
     /// <summary>Price typed or picked for the next restock (session only).</summary>
     private readonly Dictionary<(uint, bool), long> restockPrice = new();
@@ -38,7 +41,7 @@ public sealed class LowStockTab
     {
         DrawAdd();
         ImGui.Separator();
-        if (!string.IsNullOrEmpty(lastMessage)) ImGui.TextColored(new System.Numerics.Vector4(0.95f, 0.8f, 0.4f, 1f), lastMessage);
+        if (!string.IsNullOrEmpty(lastMessage)) ImGui.TextColored(new Vector4(0.95f, 0.8f, 0.4f, 1f), lastMessage);
         DrawTable();
     }
 
@@ -81,26 +84,30 @@ public sealed class LowStockTab
             return;
         }
 
+        DrawTagCombo("##kind-filter", Strings.StockKindLabel, ref kindFilter, Strings.StockTag, Strings.AllStockTags, 140);
+        ImGui.SameLine();
+        DrawTagCombo("##status-filter", Strings.StockStatusLabel, ref statusFilter, Strings.StockTag, Strings.AllStockTags, 140);
+
         var bellOpen = AddonHelper.IsOpen("RetainerList");
+        var cid = Plugin.PlayerState.ContentId;
+        var retainerNames = service.CurrentRetainerNames();
         const ImGuiTableFlags flags = ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY | ImGuiTableFlags.SizingStretchProp;
-        if (!ImGui.BeginTable("##lowstock", 10, flags, new System.Numerics.Vector2(0, Math.Max(120f, ImGui.GetContentRegionAvail().Y)))) return;
+        if (!ImGui.BeginTable("##lowstock", 8, flags, new Vector2(0, Math.Max(120f, ImGui.GetContentRegionAvail().Y)))) return;
         ImGui.TableSetupScrollFreeze(0, 1);
-        ImGui.TableSetupColumn("Item", ImGuiTableColumnFlags.WidthStretch, 0.3f);
-        ImGui.TableSetupColumn("Listed", ImGuiTableColumnFlags.WidthFixed, 50);
-        ImGui.TableSetupColumn("Available", ImGuiTableColumnFlags.WidthFixed, 65);
-        ImGui.TableSetupColumn("Alert ≤", ImGuiTableColumnFlags.WidthFixed, 60);
-        ImGui.TableSetupColumn("Per listing", ImGuiTableColumnFlags.WidthFixed, 75);
-        ImGui.TableSetupColumn("Price", ImGuiTableColumnFlags.WidthFixed, 100);
-        ImGui.TableSetupColumn("Market -undercut", ImGuiTableColumnFlags.WidthFixed, 190);
-        ImGui.TableSetupColumn("Restock to", ImGuiTableColumnFlags.WidthFixed, 60);
-        ImGui.TableSetupColumn("##restock", ImGuiTableColumnFlags.WidthFixed, 70);
-        ImGui.TableSetupColumn("##remove", ImGuiTableColumnFlags.WidthFixed, 30);
+        ImGui.TableSetupColumn(Strings.StockItem, ImGuiTableColumnFlags.WidthStretch, 1);
+        ImGui.TableSetupColumn(Strings.StockCounts, ImGuiTableColumnFlags.WidthFixed, 76);
+        ImGui.TableSetupColumn(Strings.StockThreshold, ImGuiTableColumnFlags.WidthFixed, 49);
+        ImGui.TableSetupColumn(Strings.StockPerListing, ImGuiTableColumnFlags.WidthFixed, 63);
+        ImGui.TableSetupColumn(Strings.StockPrice, ImGuiTableColumnFlags.WidthFixed, 82);
+        ImGui.TableSetupColumn(Strings.StockMarket, ImGuiTableColumnFlags.WidthFixed, 111);
+        ImGui.TableSetupColumn(Strings.StockTarget, ImGuiTableColumnFlags.WidthFixed, 91);
+        ImGui.TableSetupColumn("##remove", ImGuiTableColumnFlags.WidthFixed, 21);
         ImGui.TableHeadersRow();
 
         LowStockEntry? remove = null;
         var now = DateTime.UtcNow;
         var tracker = Plugin.Instance.Tracker.Tracker;
-        foreach (var e in configuration.LowStock)
+        foreach (var e in configuration.LowStock.Where(e => e.MatchesTags(kindFilter, statusFilter)))
         {
             var id = $"{e.ItemId}-{e.IsHq}";
             var listed = service.ListedUnits(e.ItemId, e.IsHq);
@@ -109,10 +116,16 @@ public sealed class LowStockTab
 
             ImGui.TableNextRow();
             ImGui.TableNextColumn();
-            if (low) ImGui.TextColored(new System.Numerics.Vector4(1f, 0.55f, 0.4f, 1f), ItemName(e.ItemId) + (e.IsHq ? " (HQ)" : ""));
-            else ImGui.TextUnformatted(ItemName(e.ItemId) + (e.IsHq ? " (HQ)" : ""));
-            ImGui.TableNextColumn(); ImGui.TextUnformatted(listed.ToString());
-            ImGui.TableNextColumn(); ImGui.TextUnformatted(avail.ToString());
+            if (low) ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.55f, 0.4f, 1f));
+            ImGui.TextWrapped(ItemName(e.ItemId) + (e.IsHq ? " (HQ)" : ""));
+            if (low) ImGui.PopStyleColor();
+            ImGui.PushID(id);
+            DrawRowOptions(e, cid, retainerNames);
+            ImGui.PopID();
+
+            ImGui.TableNextColumn();
+            ImGui.TextUnformatted($"{listed:N0} / {avail:N0}");
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.StockCountsHint);
 
             ImGui.TableNextColumn();
             var th = e.Threshold;
@@ -148,15 +161,12 @@ public sealed class LowStockTab
                 var age = DateTime.UtcNow - s.FetchedUtc;
                 if (ImGui.SmallButton($"Use {s.Price:N0}##use-{id}")) restockPrice[key] = s.Price;
                 if (ImGui.IsItemHovered()) ImGui.SetTooltip($"Market lowest -{configuration.UndercutGil}, subject to the price floor. Fetched {(int)age.TotalMinutes} min ago.");
-                ImGui.SameLine();
-                ImGui.TextDisabled($"{(int)age.TotalMinutes}m");
             }
             else
             {
                 ImGui.TextDisabled(sug == null ? "not fetched" : configuration.MatchQuality.For(e.ItemId, e.IsHq)
                     ? Strings.NoCompetitor(e.IsHq) : "no competitor");
             }
-            ImGui.SameLine();
             var compareFrom = service.RetainerToCompareFrom(e);
             var canCheck = bellOpen && !executor.IsRunning && compareFrom != null;
             if (!canCheck) ImGui.BeginDisabled();
@@ -188,11 +198,11 @@ public sealed class LowStockTab
                 configuration.Save();
             }
 
-            ImGui.TableNextColumn();
-            var can = bellOpen && !executor.IsRunning && to > listed;
+            var topUps = listed > 0 && avail > 0 && configuration.TopUpPartialStacksOnRestock;
+            var can = bellOpen && !executor.IsRunning && (to > listed || (topUps && service.PlanRestock(e, listed, 0).Count > 0));
             var userPrices = listed == 0; // nothing listed: the game's price window decides
             if (!can) ImGui.BeginDisabled();
-            if (ImGui.SmallButton(userPrices ? $"List & price##rs-{id}" : $"Restock##rs-{id}"))
+            if (ImGui.SmallButton($"{(userPrices ? Strings.StockListAndPrice : Strings.StockRestock)}##rs-{id}"))
             {
                 if (userPrices) RestockWithHandover(e, to);
                 else Restock(e, to, restockPrice.TryGetValue(key, out var rp) ? rp : service.Price(e));
@@ -201,6 +211,7 @@ public sealed class LowStockTab
             if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
                 ImGui.SetTooltip(!bellOpen ? "open the summoning bell first"
                     : userPrices ? $"Nothing listed: opens the game's 'Put up for sale' window and waits for your price; the rest (up to {to}) follow at that price"
+                    : topUps ? string.Format(Strings.TopUpRestockHint, to)
                     : $"List up to {to} units now (retainer inventory, then bag, then saddlebag) at the price on this row");
 
             ImGui.TableNextColumn();
@@ -215,11 +226,94 @@ public sealed class LowStockTab
         }
     }
 
+    private void DrawRowOptions(LowStockEntry entry, ulong cid, IReadOnlyList<string> names)
+    {
+        var kind = entry.Kind;
+        var status = entry.Status;
+        if (kind != StockKind.None)
+        {
+            var color = kind switch
+            {
+                StockKind.Flip => new Vector4(1f, 0.75f, 0.3f, 1f),
+                StockKind.Gather => new Vector4(0.5f, 0.9f, 0.6f, 1f),
+                _ => new Vector4(0.6f, 0.75f, 1f, 1f),
+            };
+            ImGui.PushStyleColor(ImGuiCol.Text, color);
+            DrawTagButton(Strings.StockTag(kind));
+            ImGui.PopStyleColor();
+        }
+        if (status != StockStatus.None) DrawTagButton($"[{Strings.StockTag(status)}]");
+        if (kind == StockKind.None && status == StockStatus.None) DrawTagButton(Strings.StockTags);
+        if (ImGui.BeginPopup("##tags"))
+        {
+            var changed = DrawTagCombo("##kind", Strings.StockKindLabel, ref kind, Strings.StockTag, Strings.NoStockTag, 150);
+            changed |= DrawTagCombo("##status", Strings.StockStatusLabel, ref status, Strings.StockTag, Strings.NoStockTag, 150);
+            if (changed)
+            {
+                entry.Kind = kind;
+                entry.Status = status;
+                configuration.Save();
+            }
+            ImGui.EndPopup();
+        }
+
+        var selected = entry.PreferredRetainers.GetValueOrDefault(cid);
+        var seller = $"{Strings.SellOn}: {selected ?? Strings.ResetFloorToAuto}";
+        ImGui.SetNextItemWidth(-1);
+        ImGui.BeginDisabled(cid == 0);
+        if (ImGui.BeginCombo("##seller", seller))
+        {
+            if (ImGui.Selectable(Strings.ResetFloorToAuto, selected == null))
+            {
+                entry.PreferredRetainers.Remove(cid);
+                configuration.Save();
+            }
+            foreach (var name in names)
+                if (ImGui.Selectable(name, selected == name))
+                {
+                    entry.PreferredRetainers[cid] = name;
+                    configuration.Save();
+                }
+            ImGui.EndCombo();
+        }
+        ImGui.EndDisabled();
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip(seller);
+    }
+
+    private static void DrawTagButton(string label)
+    {
+        var style = ImGui.GetStyle();
+        var right = ImGui.GetCursorScreenPos().X + ImGui.GetContentRegionAvail().X;
+        var width = ImGui.CalcTextSize(label).X + 2 * style.FramePadding.X + style.ItemSpacing.X;
+        if (ImGui.GetItemRectMax().X + width <= right) ImGui.SameLine();
+        if (ImGui.SmallButton(label)) ImGui.OpenPopup("##tags");
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.StockTags);
+    }
+
+    private static bool DrawTagCombo<T>(string id, string label, ref T current, Func<T, string> text, string unselected, float width)
+        where T : struct, Enum
+    {
+        var changed = false;
+        ImGui.SetNextItemWidth(width);
+        string Label(T value) => EqualityComparer<T>.Default.Equals(value, default) ? unselected : text(value);
+        if (ImGui.BeginCombo(id, $"{label}: {Label(current)}"))
+        {
+            foreach (var value in Enum.GetValues<T>())
+                if (ImGui.Selectable(Label(value), EqualityComparer<T>.Default.Equals(value, current)))
+                {
+                    current = value;
+                    changed = true;
+                }
+            ImGui.EndCombo();
+        }
+        return changed;
+    }
+
     private void RestockWithHandover(LowStockEntry e, int target)
     {
         // Price 1 only so the planner produces the listing layout; the user prices the first one in the
         // game's sale window and the rest follow at that price.
-        var actions = service.PlanRestock(e, target, 1);
+        var actions = service.PlanRestock(e, target, 1, allowTopUps: false);
         if (actions.Count == 0)
         {
             var why = service.Sources(e.ItemId, e.IsHq).Count == 0 ? "none in retainer inventories / bag / saddlebag" : "no free market slot";
@@ -228,6 +322,7 @@ public sealed class LowStockTab
         }
         lastMessage = $"{ItemName(e.ItemId)}: opening the game's sale window for you";
         Plugin.ChatPrint(lastMessage);
+        executor.PrintPreferredRetainerFallbacks(actions);
         executor.StartRestockWithHandover(actions);
     }
 
@@ -244,7 +339,12 @@ public sealed class LowStockTab
         }
         confirmDialog.Request(actions, list =>
         {
-            lastMessage = string.Format(Strings.LowStockListing, ItemName(e.ItemId), list.Sum(a => a.Quantity), list.Count, price);
+            var added = list.Where(a => a.TopUp == null).ToList();
+            var topUps = list.Count - added.Count;
+            var lines = new List<string>();
+            if (added.Count > 0) lines.Add(string.Format(Strings.LowStockListing, ItemName(e.ItemId), added.Sum(a => a.Quantity), added.Count, price));
+            if (topUps > 0) lines.Add(string.Format(Strings.TopUpCount, topUps));
+            lastMessage = string.Join(" · ", lines);
             Plugin.ChatPrint(lastMessage);
             executor.StartApplyActions(list);
         });

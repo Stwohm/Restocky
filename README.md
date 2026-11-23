@@ -49,7 +49,7 @@ retainer list appears. You get updates from `/xlplugins` like any other plugin.
   **Match quality by default** in Settings.
   **Default** restores inheritance for that quality.
 - With matching enabled, Full cycle, Auto cycle and I set prices keep your asking price when no
-  same-quality competitor exists and report the reason in chat. Low stock offers no market suggestion
+  same-quality competitor exists and report the reason in chat. Stock tracking offers no market suggestion
   in that case. Bait checks and new rival observations use the same competitor pool.
 - Bait listings are skipped and reported in chat. A bait listing is one or two listings that are at
   least 1.5× cheaper than the next group.
@@ -63,14 +63,18 @@ retainer list appears. You get updates from `/xlplugins` like any other plugin.
   The I set prices table marks these rows for review.
 - If every competitor is more expensive than you, the price is raised.
 
-### Low stock
+### Stock tracking
 
 - Watch an item. When the listed quantity falls to your threshold, Restocky warns you in chat and in
-  the window title.
-- **Restock** takes stock from the retainer that already sells the item, then from your bag, then
-  from your saddlebag, and lists it at the price you choose.
+  the window header.
+- **Restock** can top up partial listings at their existing price, starting with the fullest stack.
+  Review the plan before it runs. Remaining units can create new listings up to the target.
+  Turn off **Top up partial stacks on Restock** in Settings to add new listings only.
 - **List & price:** if nothing is listed yet, Restocky opens the game's sale window. You set the price
   there, and Restocky lists the remaining stacks at that price.
+- **Sell on** lets you choose a retainer per item and quality. Auto prefers a retainer that already
+  sells the item and is used as a fallback when the chosen retainer cannot take a listing.
+- Add **Flip**, **Gather**, or **Craft** and **Regular** or **Trial** tags to filter the list.
 
 ### Sales, costs and profit
 

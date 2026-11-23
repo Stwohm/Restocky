@@ -101,6 +101,7 @@ public sealed class Configuration : IPluginConfiguration
 
     /// <summary>Items watched for low stock (alert + restock).</summary>
     public List<Restocker.Plan.LowStockEntry> LowStock { get; set; } = new();
+    public bool TopUpPartialStacksOnRestock { get; set; } = true;
 
     // Fork: age in whole days before an active listing is flagged as stuck.
     public int StuckListingDays { get; set; } = 3;

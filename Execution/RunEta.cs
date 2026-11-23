@@ -24,7 +24,7 @@ internal readonly record struct RunEtaWork(int Retainers = 0, int Rows = 0, int 
         IReadOnlyList<ListingEntry> snapshot, Func<uint, bool, bool> isHeld)
     {
         var work = new RunEtaWork(Retainers: 1, Reprices: job.Actions.Count(a => a.Kind == PlannedActionKind.Reprice),
-            Listings: job.Actions.Count(a => a.Kind == PlannedActionKind.NewListing));
+            Listings: job.Actions.Count(a => a.Kind is PlannedActionKind.NewListing or PlannedActionKind.TopUp));
         if (!job.FetchPrices) return work;
 
         var eligible = job.AutoPlan ? snapshot.Count(l => !isHeld(l.ItemId, l.IsHQ)) : 0;
