@@ -51,6 +51,7 @@ public sealed class Plugin : IDalamudPlugin
     private MarketWatcher MarketWatcher { get; }
     private UndercutHistoryHost Undercuts { get; }
     internal UndercutHistory UndercutHistory => Undercuts.History;
+    internal ListingMarketScans ListingScans => Undercuts.ListingScans;
     // Fork: market purchase cost basis.
     private CostLedgerHost Costs { get; }
     private AutoCycleController AutoCycle { get; }

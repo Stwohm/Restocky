@@ -509,7 +509,7 @@ public sealed class RepriceTab
             ImGui.TableNextColumn();
             ImGui.TextUnformatted(l.UnitPrice == 0 ? Strings.PriceUnknown : l.UnitPrice.ToString("N0"));
             ImGui.TableNextColumn();
-            DrawUndercutters(l);
+            DrawUndercutters(snap.Key, l);
             ImGui.TableNextColumn();
             var editKey = EditKey(snap.Key, l);
             DrawPriceInput(editKey, l);
@@ -610,13 +610,10 @@ public sealed class RepriceTab
     }
 
     // Fork: display competitors from the last scan and the past week's most active rivals.
-    private void DrawUndercutters(ListingEntry listing)
+    private void DrawUndercutters(string retainerKey, ListingEntry listing)
     {
-        var updated = marketCache.UpdatedUtc(listing.ItemId);
-        var offers = updated == null ? System.Array.Empty<MarketOffer>() : marketCache.GetOffers(listing.ItemId, listing.IsHQ, configuration.MatchQuality.For(listing.ItemId, listing.IsHQ));
-        var price = listing.UnitPrice;
-        // The cache sorts by unit price, so the first offer is enough to color the icon.
-        if (offers.Count > 0 && offers[0].Price < price)
+        var scan = Plugin.Instance.ListingScans.Get(retainerKey, listing.ListingIndex, listing.ItemId, listing.IsHQ);
+        if (scan is { WasUndercut: true })
             ImGui.TextColored(new System.Numerics.Vector4(0.95f, 0.8f, 0.4f, 1f), "(!)");
         else
             ImGui.TextDisabled("(!)");
@@ -626,8 +623,10 @@ public sealed class RepriceTab
         ImGui.BeginTooltip();
         var nowUtc = System.DateTime.UtcNow;
         var history = Plugin.Instance.UndercutHistory;
+        var price = scan?.UnitPrice ?? 0;
+        var offers = scan?.Offers ?? System.Array.Empty<MarketOffer>();
         var summary = UndercutSummary.Create(offers, price);
-        if (updated == null)
+        if (scan == null)
             ImGui.TextUnformatted(Strings.UndercuttersNoScan);
         else if (price == 0)
             ImGui.TextUnformatted(Strings.UndercuttersUnknownPrice);
@@ -635,6 +634,9 @@ public sealed class RepriceTab
             ImGui.TextUnformatted(Strings.UndercuttersNone);
         else
             ImGui.TextUnformatted(string.Format(Strings.UndercuttersHeader, price, summary.ListingCount, summary.UnitCount));
+
+        if (price > 0 && listing.UnitPrice > 0 && price != listing.UnitPrice)
+            ImGui.TextUnformatted(string.Format(Strings.UndercuttersPriceChange, price, listing.UnitPrice));
 
         const ImGuiTableFlags flags = ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.RowBg | ImGuiTableFlags.NoSavedSettings;
         if (summary.Offers.Count > 0 && ImGui.BeginTable("##undercutters", 6, flags))
@@ -660,7 +662,7 @@ public sealed class RepriceTab
 
         if (summary.RemainingCount > 0)
             ImGui.TextUnformatted(string.Format(Strings.UndercuttersMore, summary.RemainingCount));
-        if (updated is { } scannedUtc)
+        if (scan is { ScannedUtc: var scannedUtc })
         {
             var minutes = (nowUtc - scannedUtc).TotalMinutes;
             ImGui.TextDisabled(minutes < 1 ? Strings.UndercuttersScannedNow

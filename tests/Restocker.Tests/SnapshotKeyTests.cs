@@ -18,6 +18,19 @@ public class SnapshotKeyTests
         Assert.Equal("12345678ABCDEF.ABCDEF12", key);
     }
 
+    [Theory]
+    [InlineData(3, 42u, true)]
+    [InlineData(2, 43u, true)]
+    [InlineData(2, 42u, false)]
+    public void RetainerSnapshot_reprice_requires_matching_slot_item_and_quality(int slot, uint itemId, bool isHq)
+    {
+        var listing = new ListingEntry { ListingIndex = 2, ItemId = 42, IsHQ = true, UnitPrice = 100 };
+        var snapshot = new RetainerSnapshot { Listings = [listing] };
+
+        Assert.False(snapshot.TryUpdateListingPrice(slot, itemId, isHq, 89));
+        Assert.Equal(100L, listing.UnitPrice);
+    }
+
     [Fact]
     public void CharacterSnapshot_MakeKey_uses_char_prefix()
     {

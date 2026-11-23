@@ -18,6 +18,7 @@ internal sealed class UndercutHistoryHost : IDisposable
     private bool disposed;
 
     public UndercutHistory History { get; }
+    public ListingMarketScans ListingScans { get; } = new();
 
     public UndercutHistoryHost(MarketWatcher watcher, Configuration configuration, IFramework framework,
         IPlayerState playerState, IObjectTable objectTable, IPluginLog log, string directory)
@@ -34,7 +35,7 @@ internal sealed class UndercutHistoryHost : IDisposable
         framework.Update += OnUpdate;
     }
 
-    private void OnOffersUpdated(uint itemId, MarketScan scan)
+    private void OnOffersUpdated(uint itemId, MarketScan scan, bool executorFetch)
     {
         var observedUtc = DateTime.UtcNow;
         _ = framework.RunOnFrameworkThread(() =>
@@ -42,7 +43,7 @@ internal sealed class UndercutHistoryHost : IDisposable
             if (disposed) return;
             try
             {
-                RecordScan(itemId, scan, observedUtc);
+                RecordScan(itemId, scan, observedUtc, executorFetch);
             }
             catch (Exception ex)
             {
@@ -51,8 +52,7 @@ internal sealed class UndercutHistoryHost : IDisposable
         });
     }
 
-    private void RecordScan(uint itemId, MarketScan scan,
-        DateTime observedUtc)
+    private void RecordScan(uint itemId, MarketScan scan, DateTime observedUtc, bool executorFetch)
     {
         var player = objectTable.LocalPlayer;
         var contentId = playerState.ContentId;
@@ -66,7 +66,13 @@ internal sealed class UndercutHistoryHost : IDisposable
             if (snapshot.CharacterContentId != contentId) continue;
             foreach (var listing in snapshot.Listings)
             {
-                if (listing.ItemId != itemId || listing.UnitPrice <= 0) continue;
+                if (listing.ItemId != itemId) continue;
+                // The executor records its scans against the live listings of the visited retainer.
+                if (!executorFetch)
+                    ListingScans.Record(snapshot.Key, listing.ListingIndex, itemId, listing.IsHQ,
+                        new ListingMarketScan(observedUtc, listing.UnitPrice,
+                            scan.Competitors(listing.IsHQ, configuration.MatchQuality.For(itemId, listing.IsHQ))));
+                if (listing.UnitPrice <= 0) continue;
                 ref var lowest = ref (listing.IsHQ ? ref lowestHq : ref lowestNq);
                 if (lowest == 0 || listing.UnitPrice < lowest) lowest = listing.UnitPrice;
             }

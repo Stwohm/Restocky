@@ -24,8 +24,8 @@ public sealed unsafe class MarketWatcher : IDisposable
     /// </summary>
     public event Action<uint, MarketScan>? CompetitorsObserved;
 
-    // Fork: fresh competitor offers from manual and automated searches, grouped by quality.
-    internal event Action<uint, MarketScan>? OffersUpdated;
+    // Fork: fresh offers from an identified search, with whether the executor requested it.
+    internal event Action<uint, MarketScan, bool>? OffersUpdated;
 
     /// <summary>同じ検索結果が複数回飛んでくる server エラー時の保護。</summary>
     private int lastRequestId = -1;
@@ -137,8 +137,7 @@ public sealed unsafe class MarketWatcher : IDisposable
                 }
                 catch (Exception ex) { log.Error(ex, "[Restocker] CompetitorsObserved handler threw"); }
             }
-            if (nqPrices.Count != 0 || hqPrices.Count != 0)
-                OffersUpdated?.Invoke(itemId, scan);
+            OffersUpdated?.Invoke(itemId, scan, expectedItemId.HasValue);
 
             dump.Append($"\n  → nq={nqPrices.Count} (lowest {Cache.GetLowest(itemId, false, true):N0})  hq={hqPrices.Count} (lowest {Cache.GetLowest(itemId, true, true):N0})");
             log.Information(dump.ToString());

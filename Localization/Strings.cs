@@ -281,6 +281,7 @@ public static class Strings
     public static string UndercuttersHeader => T("Cheaper than you ({0:N0}): {1:N0} listings, {2:N0} units", "自分の価格（{0:N0}）より安い出品：{1:N0}件、計{2:N0}個", "Günstiger als dein Preis ({0:N0}): {1:N0} Angebote, {2:N0} Stück", "Moins cher que votre prix ({0:N0}) : {1:N0} offres, {2:N0} unités", "低于你的价格（{0:N0}）：{1:N0} 个挂单，共 {2:N0} 件", "내 가격({0:N0})보다 저렴한 매물: {1:N0}건, 총 {2:N0}개");
     public static string UndercuttersUnknownPrice => T("Your price unknown", "自分の価格は不明", "Dein Preis ist unbekannt", "Votre prix est inconnu", "你的价格未知", "내 가격을 알 수 없습니다");
     public static string UndercuttersSeller => T("Seller", "出品者", "Verkäufer", "Vendeur", "卖家", "판매자");
+    public const string UndercuttersPriceChange = "Price at scan {0:N0} · Current price {1:N0}";
     public static string UndercuttersQuantity => T("Qty", "個数", "Anz.", "Qté", "数量", "수량");
     public static string UndercuttersUnitPrice => T("Unit price", "単価", "Stückpreis", "Prix unitaire", "单价", "개당 가격");
     public static string UndercuttersLast24h => T("24h", "24時間", "24 Std.", "24 h", "24小时", "24시간");

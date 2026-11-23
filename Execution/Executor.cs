@@ -65,6 +65,8 @@ public sealed unsafe class Executor : IDisposable
     private uint pendingListingItemId;
     private bool pendingListingIsHQ;
     private int pendingListingQuantity;
+    private string? listedRetainerKey;
+    private PlannedAction? pendingReprice;
 
     /// <summary>PreStagingSaddle 用: 最後の saddle slot 移動を発火した時刻。
     /// 最終 staging からの settle 時間を保証するため。</summary>
@@ -370,6 +372,7 @@ public sealed unsafe class Executor : IDisposable
         foreach (var a in h.AllFollowUps) a.UnitPrice = price; // 0 => ExecuteDirectListing skips them
         if (price > 0)
         {
+            listedRetainerKey = ActiveRetainerKey();
             foreach (var a in h.SameRetainerFollowUps) currentJobActions.Enqueue(a);
             TotalActions += h.SameRetainerFollowUps.Count;
         }
@@ -508,6 +511,8 @@ public sealed unsafe class Executor : IDisposable
     private void Wait(TimeSpan span) => nextStepNoEarlierThan = DateTime.UtcNow + span;
     private void Stop(string reason)
     {
+        CaptureListingsAfterActions();
+        pendingReprice = null;
         handover = null;
         fetchRows = null;
         fetchRowsPending = false;
@@ -832,6 +837,7 @@ public sealed unsafe class Executor : IDisposable
     private void EnterJob()
     {
         jobObserved = false;
+        listedRetainerKey = null;
         currentJobActions.Clear();
         foreach (var a in jobs[jobCursor].Actions) currentJobActions.Enqueue(a);
         fetchRows = null;
@@ -966,8 +972,14 @@ public sealed unsafe class Executor : IDisposable
 
     private void TickPerformingAction()
     {
-        // Fork: one authoritative listing read per retainer visit (Refresh all, cycles, restock),
-        // so the tracker / Low stock counts are exact without waiting for a second visit.
+        if (pendingReprice is { } reprice)
+        {
+            TickPendingReprice(reprice);
+            return;
+        }
+
+        // Read the live listings once at the start of the visit. Jobs that add listings
+        // capture them again before closing the sell list.
         if (!jobObserved)
         {
             jobObserved = true;
@@ -1022,43 +1034,31 @@ public sealed unsafe class Executor : IDisposable
                 {
                     currentJobActions.Dequeue();
                     CompletedActions++;
-                    if (action.UnitPrice > uint.MaxValue)
+                    if (action.UnitPrice <= 0 || action.UnitPrice > uint.MaxValue)
                     {
-                        log.Warning($"[Restocker] reprice skipped: price {action.UnitPrice:N0} exceeds the market API limit");
+                        log.Warning($"[Restocker] reprice skipped: price {action.UnitPrice:N0} is outside the market API range");
                         RepricesSkipped++;
                         WriteHistory(action, action.UnitPrice, false, RepriceReason.Error);
                         Throttle();
                         return;
                     }
                     var im = InventoryManager.Instance();
-                    if (im == null) { Throttle(); return; }
-
                     // Fork: the slot must still hold the item the plan was made for. A stale
                     // snapshot used to reprice whatever item had moved into that slot.
-                    var market = im->GetInventoryContainer(InventoryType.RetainerMarket);
-                    var slotItem = market != null && action.ListingIndex >= 0 && action.ListingIndex < market->Size
-                        ? market->GetInventorySlot(action.ListingIndex)
-                        : null;
-                    var slotItemId = slotItem != null ? slotItem->ItemId : 0u;
-                    var slotHq = slotItem != null && (slotItem->Flags & InventoryItem.ItemFlags.HighQuality) != 0;
-                    if (slotItemId != action.ItemId || slotHq != action.IsHQ)
+                    if (!TryReadRepriceSlot(im, action, out var livePrice))
                     {
-                        log.Warning($"[Restocker] reprice skipped: slot {action.ListingIndex} holds item={slotItemId} hq={slotHq}, plan expected item={action.ItemId} hq={action.IsHQ} (stale plan)");
+                        log.Warning($"[Restocker] reprice skipped: could not verify {action.RetainerKey} slot={action.ListingIndex} item={action.ItemId} hq={action.IsHQ}");
                         RepricesSkipped++;
                         WriteHistory(action, action.UnitPrice, false, RepriceReason.Error);
                         Throttle();
                         return;
                     }
-                    if (action.OldPrice == 0) action.OldPrice = (long)im->GetRetainerMarketPrice((short)action.ListingIndex);
+                    if (action.OldPrice == 0) action.OldPrice = livePrice;
 
                     im->SetRetainerMarketPrice((short)action.ListingIndex, (uint)action.UnitPrice);
                     log.Information($"[Restocker] SetRetainerMarketPrice slot={action.ListingIndex} item={action.ItemId} hq={action.IsHQ} {action.OldPrice:N0} -> {action.UnitPrice:N0} ({RepriceRules.ReasonCode(action.Reason)})");
-                    RepricesApplied++;
-                    AppliedReprices.Add((jobs.Count > jobCursor ? jobs[jobCursor].RetainerName : "?",
-                        action.ItemId, action.IsHQ, action.OldPrice, action.UnitPrice));
-                    WriteHistory(action, action.UnitPrice, true, action.Reason);
-                    Plugin.Instance?.Tracker.Tracker.OnRepriceApplied(
-                        ActiveRetainerKey(), action.ListingIndex, action.ItemId, action.IsHQ, action.UnitPrice);
+                    pendingReprice = action;
+                    waitingSince = DateTime.UtcNow;
                     Throttle();
                     return;
                 }
@@ -1102,6 +1102,52 @@ public sealed unsafe class Executor : IDisposable
                 }
         }
         Stop($"unknown action kind {action.Kind}");
+    }
+
+    private bool TryReadRepriceSlot(InventoryManager* im, PlannedAction action, out long price)
+    {
+        price = 0;
+        if (im == null || ActiveRetainerKey() != action.RetainerKey) return false;
+        var market = im->GetInventoryContainer(InventoryType.RetainerMarket);
+        if (market == null || !market->IsLoaded || action.ListingIndex < 0 || action.ListingIndex >= market->Size)
+            return false;
+        var slot = market->GetInventorySlot(action.ListingIndex);
+        if (slot == null || slot->ItemId != action.ItemId) return false;
+        var isHq = (slot->Flags & InventoryItem.ItemFlags.HighQuality) != 0;
+        if (isHq != action.IsHQ) return false;
+        price = (long)im->GetRetainerMarketPrice((short)action.ListingIndex);
+        return true;
+    }
+
+    private void TickPendingReprice(PlannedAction action)
+    {
+        var confirmed = TryReadRepriceSlot(InventoryManager.Instance(), action, out var price) && price == action.UnitPrice;
+        if (!confirmed)
+        {
+            waitingSince ??= DateTime.UtcNow;
+            if (DateTime.UtcNow - waitingSince.Value < TimeSpan.FromSeconds(3)) return;
+            // SetRetainerMarketPrice was already called. Before this fork change every call counted as
+            // applied; keep that on timeout so a slow client-side price read never turns into a "failed"
+            // history row. Only the log notes that the live read did not confirm it.
+            log.Warning($"[Restocker] reprice not confirmed by live read for {action.RetainerKey} slot={action.ListingIndex} item={action.ItemId} hq={action.IsHQ}; counting as applied");
+            price = action.UnitPrice;
+        }
+
+        if (configuration.Snapshots.TryGetValue(action.RetainerKey, out var snapshot)
+            && snapshot.TryUpdateListingPrice(action.ListingIndex, action.ItemId, action.IsHQ, price))
+            configuration.Save();
+        else if (confirmed)
+            Plugin.Instance?.RetainerWatcher.CaptureActiveRetainerSnapshot();
+
+        RepricesApplied++;
+        AppliedReprices.Add((jobs.Count > jobCursor ? jobs[jobCursor].RetainerName : "?",
+            action.ItemId, action.IsHQ, action.OldPrice, price));
+        WriteHistory(action, price, true, action.Reason);
+        Plugin.Instance?.Tracker.Tracker.OnRepriceApplied(
+            action.RetainerKey, action.ListingIndex, action.ItemId, action.IsHQ, price);
+
+        pendingReprice = null;
+        waitingSince = null;
     }
 
     /// <summary>
@@ -1642,12 +1688,25 @@ public sealed unsafe class Executor : IDisposable
     {
         // Fork: only data written after this ComparePrices click counts. Upstream accepted any
         // cached entry, so a second fetch of the same item returned the previous result instantly.
-        var ready = marketCache != null && marketCache.HasDataSince(fetchItemId, fetchClickedAtUtc);
+        var scan = marketCache?.GetScan(fetchItemId);
+        var ready = scan?.UpdatedUtc >= fetchClickedAtUtc;
         var timeout = waitingSince != null && DateTime.UtcNow - waitingSince.Value > TimeSpan.FromSeconds(6);
         if (!ready && !timeout) return;
 
         if (!ready) log.Warning($"[Restocker] market fetch timeout for item={fetchItemId} hq={fetchIsHq} (ItemSearchResult open={AddonHelper.IsOpen("ItemSearchResult")})");
-        else log.Information($"[Restocker] market data ready for item={fetchItemId} hq={fetchIsHq}, competitors={marketCache!.GetOffers(fetchItemId, fetchIsHq, true).Count}, lowest={marketCache.GetLowest(fetchItemId, fetchIsHq, true)}");
+        else if (scan is { } fresh)
+        {
+            var key = ActiveRetainerKey();
+            var listingScans = Plugin.Instance?.ListingScans;
+            foreach (var listing in ReadLiveListings())
+            {
+                if (listing.ItemId != fetchItemId) continue;
+                var offers = fresh.Scan.Competitors(listing.IsHQ, configuration.MatchQuality.For(fetchItemId, listing.IsHQ));
+                listingScans?.Record(key, listing.Slot, listing.ItemId, listing.IsHQ,
+                    new ListingMarketScan(fresh.UpdatedUtc, listing.UnitPrice, offers));
+            }
+            log.Information($"[Restocker] market data ready for item={fetchItemId} hq={fetchIsHq}, competitors={fresh.Scan.Competitors(fetchIsHq, true).Count}, lowest={marketCache!.GetLowest(fetchItemId, fetchIsHq, true)}");
+        }
 
         // 1 件分の fetch 完了。expected は 0 (= 全部無視) に戻して次の listing に進む。
         Plugin.Instance?.SetMarketWatcherExpected(0, false);
@@ -1714,7 +1773,7 @@ public sealed unsafe class Executor : IDisposable
         if (market == null) { Stop("RetainerMarket container null"); return; }
 
         // 直前に出品した market slot に該当アイテムが入って qty が一致したら confirm
-        var slot = pendingListingSlot >= 0 && pendingListingSlot < market->Size
+        var slot = market->IsLoaded && pendingListingSlot >= 0 && pendingListingSlot < market->Size
             ? market->GetInventorySlot(pendingListingSlot)
             : null;
         if (slot != null && slot->ItemId == pendingListingItemId && slot->Quantity >= pendingListingQuantity)
@@ -1722,6 +1781,7 @@ public sealed unsafe class Executor : IDisposable
             var hq = (slot->Flags & InventoryItem.ItemFlags.HighQuality) != 0;
             if (hq == pendingListingIsHQ)
             {
+                listedRetainerKey = currentJobActions.Peek().RetainerKey;
                 CompletedActions++;
                 currentJobActions.Dequeue();
                 pendingListingSlot = -1;
@@ -1809,6 +1869,7 @@ public sealed unsafe class Executor : IDisposable
 
     private void TickClosingSellList()
     {
+        CaptureListingsAfterActions();
         var addon = AddonHelper.GetVisible("RetainerSellList");
         if (addon == null)
         {
@@ -1821,6 +1882,18 @@ public sealed unsafe class Executor : IDisposable
         log.Debug("[Restocker] closed RetainerSellList");
         State = ExecutionState.AwaitingSelectStringAfterSell;
         Throttle();
+    }
+
+    private void CaptureListingsAfterActions()
+    {
+        var key = listedRetainerKey;
+        listedRetainerKey = null;
+        if (string.IsNullOrEmpty(key) || key != ActiveRetainerKey() || !AddonHelper.IsOpen("RetainerSellList")) return;
+        try
+        {
+            Plugin.Instance?.RetainerWatcher.CaptureActiveRetainerSnapshot(authoritative: true);
+        }
+        catch (Exception ex) { log.Warning(ex, "[Restocker] snapshot refresh after listing failed"); }
     }
 
     private void TickAwaitingSelectStringAfterSell()

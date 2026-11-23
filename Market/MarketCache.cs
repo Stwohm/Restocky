@@ -67,8 +67,10 @@ public sealed class MarketCache
 
     public void Replace(uint itemId, MarketScan scan) => store[itemId] = (scan, Clock());
 
-    public DateTime? UpdatedUtc(uint itemId)
-        => store.TryGetValue(itemId, out var entry) ? entry.UpdatedUtc : null;
+    internal (MarketScan Scan, DateTime UpdatedUtc)? GetScan(uint itemId)
+        => store.TryGetValue(itemId, out var entry) ? entry : null;
+
+    public DateTime? UpdatedUtc(uint itemId) => GetScan(itemId)?.UpdatedUtc;
 
     public bool HasDataSince(uint itemId, DateTime sinceUtc) => UpdatedUtc(itemId) >= sinceUtc;
 

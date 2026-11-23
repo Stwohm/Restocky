@@ -64,7 +64,7 @@ public sealed unsafe class RetainerWatcher : IDisposable
         }
     }
 
-    public void CaptureActiveRetainerSnapshot()
+    public void CaptureActiveRetainerSnapshot(bool authoritative = false)
     {
         var retainerManager = RetainerManager.Instance();
         if (retainerManager == null || !retainerManager->IsReady) return;
@@ -86,27 +86,24 @@ public sealed unsafe class RetainerWatcher : IDisposable
             LastRefreshedUtc = DateTime.UtcNow,
         };
         snapshot.Key = RetainerSnapshot.MakeKey(snapshot.CharacterContentId, snapshot.RetainerId);
-        LastSeen = snapshot;
-
         snapshot.Listings = ReadListings(out var marketLoaded);
+        if (!marketLoaded) return;
         snapshot.Inventory = ReadInventory();
+        LastSeen = snapshot;
 
         configuration.Snapshots[snapshot.Key] = snapshot;
         configuration.Save();
 
         // Fork: feed the listing lifecycle tracker. Only with a loaded market container, so a
         // half-loaded read never looks like "everything sold".
-        if (marketLoaded)
-        {
-            var items = dataManager.GetExcelSheet<Item>();
-            var live = new List<LiveListing>(snapshot.Listings.Count);
-            foreach (var l in snapshot.Listings)
-                live.Add(new LiveListing(l.ListingIndex, l.ItemId, l.IsHQ, l.Quantity, l.UnitPrice));
-            Plugin.Instance?.Tracker.Tracker.ObserveRetainer(
-                snapshot.Key, snapshot.RetainerName, live,
-                id => items.TryGetRow(id, out var row) ? row.Name.ExtractText() : $"#{id}",
-                DateTime.UtcNow);
-        }
+        var items = dataManager.GetExcelSheet<Item>();
+        var live = new List<LiveListing>(snapshot.Listings.Count);
+        foreach (var l in snapshot.Listings)
+            live.Add(new LiveListing(l.ListingIndex, l.ItemId, l.IsHQ, l.Quantity, l.UnitPrice));
+        Plugin.Instance?.Tracker.Tracker.ObserveRetainer(
+            snapshot.Key, snapshot.RetainerName, live,
+            id => items.TryGetRow(id, out var row) ? row.Name.ExtractText() : $"#{id}",
+            snapshot.LastRefreshedUtc, authoritative);
 
         log.Debug($"[Restocker] snapshot updated: {snapshot.RetainerName} listings={snapshot.Listings.Count} inv={snapshot.Inventory.Count}");
     }
