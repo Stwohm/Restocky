@@ -48,6 +48,9 @@ public static class Strings
     public static string MatchQualityHint => T("Compare HQ with HQ and NQ with NQ. Override each quality beside the item's floor.", "HQ は HQ、NQ は NQ と比較します。アイテムの最低価格の横で品質別に変更できます。", "HQ mit HQ und NQ mit NQ vergleichen. Neben dem Mindestpreis lässt sich jede Qualität einzeln einstellen.", "Compare les offres HQ entre elles et les offres NQ entre elles. Chaque qualité se règle à côté du prix plancher.", "HQ 只与 HQ 比较，NQ 只与 NQ 比较。可在物品底价旁分别设置。", "HQ는 HQ와, NQ는 NQ와 비교합니다. 아이템 최저가 옆에서 품질별로 변경할 수 있습니다.");
     public static string UseDefault => T("Default", "既定", "Standard", "Par défaut", "默认", "기본값");
     public static string NoCompetitor(bool hq) => string.Format(T("no {0} competitor", "{0} の競合なし", "kein {0}-Konkurrenzangebot", "aucune offre concurrente {0}", "没有 {0} 竞争报价", "{0} 경쟁 매물 없음"), hq ? "HQ" : "NQ");
+    public static string NoMarketCompetitor => T("no competitor", "競合なし", "kein Konkurrenzangebot", "aucune offre concurrente", "没有竞争报价", "경쟁 매물 없음");
+    public static string NoMarketData => T("no market data", "相場データなし", "keine Marktdaten", "aucune donnée de marché", "没有市场数据", "시장 데이터 없음");
+    public static string KeptPrice => T("kept {0:N0}, {1}", "{0:N0} を維持（{1}）", "{0:N0} beibehalten, {1}", "{0:N0} conservé, {1}", "保留 {0:N0}，{1}", "{0:N0} 유지, {1}");
     public static string PriceFloorSettings => T("Price floors (manual applies to HQ and NQ, 0 = auto)", "最低価格（手動はHQ・NQ共通、0 = 自動）", "Mindestpreise (manuell für HQ und NQ, 0 = automatisch)", "Prix planchers (manuel pour HQ et NQ, 0 = auto)", "底价（手动值适用于 HQ 和 NQ，0 = 自动）", "최저가 (수동 값은 HQ와 NQ 공통, 0 = 자동)");
     public static string ResetFloorToAuto => T("Auto", "自動", "Auto", "Auto", "自动", "자동");
     public static string SaleTaxSetting => T("Sales tax %", "販売税率 %", "Verkaufssteuer %", "Taxe sur la vente %", "销售税率 %", "판매세 %");
@@ -150,6 +153,8 @@ public static class Strings
     // Fork: purchase cost basis.
     public static string TabCosts => T("Costs", "原価", "Kosten", "Coûts", "成本", "원가");
     public static string ColProfit => T("Profit", "利益", "Gewinn", "Bénéfice", "利润", "이익");
+    public static string ProfitPerUnit => T("Profit per unit  {0:N2}", "1個あたりの利益  {0:N2}", "Gewinn pro Stück  {0:N2}", "Bénéfice par unité  {0:N2}", "单件利润  {0:N2}", "개당 이익  {0:N2}");
+    public static string EarningPerUnit => T("Earning per unit  {0:N2}", "1個あたりの収益  {0:N2}", "Erlös pro Stück  {0:N2}", "Recettes par unité  {0:N2}", "单件收入  {0:N2}", "개당 수익  {0:N2}");
     public static string CostAddManual => T("Add manual lot", "原価ロットを手動追加", "Charge manuell hinzufügen", "Ajouter un lot manuel", "手动添加批次", "수동으로 입고분 추가");
     public static string CostSearchItems => T("Search items", "アイテムを検索", "Artikel suchen", "Rechercher des objets", "搜索物品", "아이템 검색");
     public static string CostNoMatchingItems => T("No matching items.", "一致するアイテムがありません。", "Keine passenden Artikel.", "Aucun objet correspondant.", "没有匹配的物品。", "일치하는 아이템이 없습니다.");

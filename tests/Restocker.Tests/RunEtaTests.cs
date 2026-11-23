@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+using Restocker.Data;
 using Restocker.Execution;
 
 namespace Restocker.Tests;
@@ -17,32 +19,85 @@ public sealed class RunEtaTests
     }
 
     [Fact]
-    public void UsesCycleAverageUntilAUnitFinishes()
+    public void BudgetsSnapshotRowsUniqueSearchesAndExpectedReprices()
     {
-        var elapsed = TimeSpan.FromSeconds(20);
-        Assert.Null(RunEta.Estimate(elapsed, 0, 8, 0, 2, 1, 1, null));
-        Assert.Equal(TimeSpan.FromSeconds(180), RunEta.Estimate(elapsed, 0, 8, 0, 2, 1, 1, TimeSpan.FromSeconds(200)));
-        Assert.Equal(TimeSpan.Zero, RunEta.Estimate(elapsed, 0, 8, 0, 2, 1, 1, TimeSpan.FromSeconds(10)));
+        var job = new RetainerVisitJob { RetainerName = "A", FetchPrices = true, AutoPlan = true, Actions = [] };
+        ListingEntry[] snapshot = [
+            new() { ItemId = 1 }, new() { ItemId = 1 },
+            new() { ItemId = 1, IsHQ = true }, new() { ItemId = 2 },
+        ];
+        var timings = new RunEtaTimings { RepriceShare = 0.5 };
+        var work = RunEtaWork.ForJob(job, timings, snapshot, (item, hq) => item == 1 && hq);
+        Assert.Equal(new RunEtaWork(Retainers: 1, Rows: 4, Searches: 3, Reprices: 2), work);
     }
 
     [Fact]
-    public void ProjectsUnvisitedFetchJobsFromDiscoveredActions()
+    public void LateSecondRetainerRowsOnlyAddWorkBeyondTheSnapshot()
     {
-        var eta = RunEta.Estimate(TimeSpan.FromSeconds(40), 4, 8, 0, 3, 1, 2, TimeSpan.FromMinutes(5));
-        Assert.Equal(TimeSpan.FromSeconds(200), eta);
+        var a = new RetainerVisitJob { RetainerName = "A", Actions = [] };
+        var b = new RetainerVisitJob { RetainerName = "B", Actions = [] };
+        var second = new RunEtaWork(Retainers: 1, Rows: 12, Searches: 8, Reprices: 2);
+        var timings = new RunEtaTimings { RowSeconds = 1.75, SearchSeconds = 0.75 };
+        var eta = new RunEta(timings, new Dictionary<RetainerVisitJob, RunEtaWork>
+        {
+            [a] = new(Retainers: 1, Rows: 4, Searches: 3),
+            [b] = second,
+        });
+        Assert.Equal(TimeSpan.FromSeconds(49.45), eta.Remaining(TimeSpan.Zero));
+
+        for (var i = 0; i < 3; i++)
+        {
+            var start = TimeSpan.FromSeconds(3 + 2.5 * i);
+            eta.StartAction(start);
+            eta.StartSearch(start + TimeSpan.FromSeconds(0.75));
+            eta.FinishSearch(start + TimeSpan.FromSeconds(1.5));
+            // The last row's duplicate is drained with it.
+            eta.FinishRow(a, i == 2 ? 0 : 3 - i, 2 - i, start + TimeSpan.FromSeconds(1.7), TimeSpan.FromSeconds(0.8));
+        }
+        eta.FinishVisit(a, TimeSpan.FromSeconds(13.5), learnOverhead: true);
+
+        var secondOpened = TimeSpan.FromSeconds(17);
+        var before = eta.Remaining(secondOpened);
+        eta.SetWork(b, second, secondOpened, discovered: true);
+        Assert.True(eta.Remaining(secondOpened) <= before);
+
+        before = eta.Remaining(secondOpened);
+        eta.SetWork(b, second with { Rows = 13, Searches = 9 }, secondOpened, discovered: true);
+        Assert.InRange(eta.Remaining(secondOpened) - before, TimeSpan.Zero, TimeSpan.FromSeconds(2.5));
+        Assert.True(eta.Remaining(secondOpened + TimeSpan.FromSeconds(1)) < eta.Remaining(secondOpened));
     }
 
     [Fact]
-    public void UsesCompletedJobsForRefreshWithoutActions()
+    public void LearnsRowAndMarketWaitSeparatelyWithoutIncreasingEtaOnASlowSearch()
     {
-        var eta = RunEta.Estimate(TimeSpan.FromSeconds(30), 0, 0, 2, 5, 0, 0, null);
-        Assert.Equal(TimeSpan.FromSeconds(45), eta);
+        var job = new RetainerVisitJob { RetainerName = "A", Actions = [] };
+        var timings = new RunEtaTimings { RowSeconds = 2, SearchSeconds = 1 };
+        var eta = new RunEta(timings, new() { [job] = new(Retainers: 1, Rows: 10, Searches: 10) });
+        eta.StartAction(TimeSpan.Zero);
+        eta.StartSearch(TimeSpan.FromSeconds(1));
+        eta.FinishSearch(TimeSpan.FromSeconds(4));
+        var elapsed = TimeSpan.FromSeconds(4.2);
+        var before = eta.Remaining(elapsed);
+        eta.FinishRow(job, 9, 9, elapsed, TimeSpan.FromSeconds(0.8));
+        Assert.True(eta.Remaining(elapsed) <= before);
+        Assert.Equal(timings.RowSeconds, eta.Timings.RowSeconds);
+        Assert.Equal(1.5, eta.Timings.SearchSeconds);
     }
 
     [Fact]
-    public void UsesActionsForApplyRuns()
+    public void ApplyRunsLearnRepriceListingAndRetainerDurationsSeparately()
     {
-        var eta = RunEta.Estimate(TimeSpan.FromSeconds(30), 3, 5, 1, 2, 0, 0, null);
-        Assert.Equal(TimeSpan.FromSeconds(20), eta);
+        var job = new RetainerVisitJob { RetainerName = "A", Actions = [] };
+        var timings = new RunEtaTimings { RepriceSeconds = 1, ListingSeconds = 1, RetainerSeconds = 4 };
+        var eta = new RunEta(timings, new() { [job] = new(Retainers: 1, Reprices: 1, Listings: 1) });
+        eta.StartAction(TimeSpan.FromSeconds(2));
+        eta.FinishReprice(job, TimeSpan.FromSeconds(2.5));
+        eta.StartAction(TimeSpan.FromSeconds(2.5));
+        eta.FinishListing(job, TimeSpan.FromSeconds(4.5));
+        eta.FinishVisit(job, TimeSpan.FromSeconds(7.5), learnOverhead: true);
+        Assert.Equal(0.875, eta.Timings.RepriceSeconds);
+        Assert.Equal(1.25, eta.Timings.ListingSeconds);
+        Assert.Equal(4.25, eta.Timings.RetainerSeconds);
+        Assert.Equal(TimeSpan.Zero, eta.Remaining(TimeSpan.FromSeconds(7.5)));
     }
 }

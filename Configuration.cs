@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using Dalamud.Configuration;
 using Restocker.Data;
+using Restocker.Execution;
 using Restocker.Localization;
 using Restocker.Market;
 using Restocker.Plan;
@@ -106,6 +107,7 @@ public sealed class Configuration : IPluginConfiguration
 
     /// <summary>Durations (seconds) of the last successful full cycles; used to time AutoRetainer waits.</summary>
     public List<double> RecentCycleSeconds { get; set; } = new();
+    public RunEtaTimings RunEtaTimings { get; set; } = new();
 
     public long FloorFor(uint itemId) => PriceFloors.TryGetValue(itemId, out var f) ? f : 0;
 

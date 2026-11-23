@@ -40,7 +40,8 @@ public static class AutoRepricePlanner
         DateTime nowUtc,
         Func<uint, bool, bool>? isHeld = null,
         Action<LiveListing, RepriceDecision, IReadOnlyList<MarketOffer>>? onDecision = null,
-        Func<uint, bool, bool>? includeBaitForPlan = null)
+        Func<uint, bool, bool>? includeBaitForPlan = null,
+        Func<uint, bool>? marketTimedOut = null)
     {
         var result = new Result();
         foreach (var l in listings)
@@ -69,7 +70,8 @@ public static class AutoRepricePlanner
             var undercutters = string.Empty;
             if (offers == null)
             {
-                d = new RepriceDecision(l.UnitPrice, false, RepriceReason.Error, 0);
+                var reason = marketTimedOut?.Invoke(l.ItemId) == true ? RepriceReason.NoData : RepriceReason.Error;
+                d = new RepriceDecision(l.UnitPrice, false, reason, 0);
             }
             else
             {

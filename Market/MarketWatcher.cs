@@ -58,6 +58,17 @@ public sealed unsafe class MarketWatcher : IDisposable
         Interlocked.Increment(ref requestGeneration);
     }
 
+    internal bool RecordEmptySearch(uint itemId)
+    {
+        var player = objectTable.LocalPlayer;
+        if (itemId == 0 || expectedItemId != itemId
+            || !MarketWorldGate.Accept(player?.CurrentWorld.RowId ?? 0, player?.HomeWorld.RowId ?? 0))
+            return false;
+
+        Cache.Replace(itemId, new MarketScan([], []) { WorldId = HomeWorldId });
+        return true;
+    }
+
     public MarketWatcher(IMarketBoard marketBoard, IObjectTable objectTable, IPluginLog log)
     {
         this.marketBoard = marketBoard;
@@ -108,27 +119,13 @@ public sealed unsafe class MarketWatcher : IDisposable
     {
         try
         {
-            if (offerings.RequestId == lastRequestId) return;
-            lastRequestId = offerings.RequestId;
-
-            var isEmpty = offerings.ItemListings.Count == 0;
-            var itemId = isEmpty ? expectedItemId.GetValueOrDefault() : offerings.ItemListings[0].ItemId;
+            // An empty packet has no item identity. The executor checks the search addon instead.
+            if (offerings.ItemListings.Count == 0 || offerings.RequestId == lastRequestId) return;
+            var itemId = offerings.ItemListings[0].ItemId;
             var player = objectTable.LocalPlayer;
             if (!MarketWorldGate.Accept(player?.CurrentWorld.RowId ?? 0, player?.HomeWorld.RowId ?? 0))
             {
                 log.Information($"[Restocker] OfferingsReceived item={itemId} ignored: not on home world");
-                return;
-            }
-
-            // Fork: an empty board for the item we are fetching means "no competitor".
-            // Record that, otherwise the executor waits for its 6s timeout every time.
-            if (isEmpty)
-            {
-                if (itemId != 0)
-                {
-                    Cache.Replace(itemId, new MarketScan([], []) { WorldId = HomeWorldId });
-                    log.Information($"[Restocker] OfferingsReceived item={itemId} empty board -> no competitor");
-                }
                 return;
             }
 
@@ -142,6 +139,7 @@ public sealed unsafe class MarketWatcher : IDisposable
                 log.Information($"[Restocker] OfferingsReceived for item={itemId} ignored (expected {expectedItemId.Value})");
                 return;
             }
+            lastRequestId = offerings.RequestId;
 
             // デバッグ用に受信 listing をすべてログに出す。OWN マークは自リテイナーで
             // スキップされた listing。各行: HQ/NQ, price, retainerId。

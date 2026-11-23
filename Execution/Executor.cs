@@ -6,6 +6,7 @@ using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.UI;
+using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 using Restocker.Common;
 using Restocker.Data;
@@ -49,13 +50,12 @@ public sealed unsafe class Executor : IDisposable
     public int TotalActions { get; private set; }
     public bool IsRunning => State != ExecutionState.Idle && State != ExecutionState.Done && State != ExecutionState.Stopped;
     public string CurrentStateLabel => State.ToString();
-    internal TimeSpan? EstimatedRemaining => RunEta.Estimate(runClock.Elapsed, CompletedActions, TotalActions,
-        CompletedJobs, CompletedJobs + jobs.Count - jobCursor, observedFetchJobs, pendingFetchJobs, initialRunDuration);
+    internal TimeSpan? EstimatedRemaining => runEta?.Remaining(runClock.Elapsed);
 
     private readonly Stopwatch runClock = new();
-    private TimeSpan? initialRunDuration;
-    private int observedFetchJobs;
-    private int pendingFetchJobs;
+    private RunEta? runEta;
+    private bool partialFirstVisit;
+    private RetainerVisitJob CurrentJob => jobs[jobCursor];
     private readonly List<RetainerVisitJob> jobs = new();
     private int jobCursor;
     private readonly HashSet<string> historyRequested = new();
@@ -109,6 +109,9 @@ public sealed unsafe class Executor : IDisposable
 
     /// <summary>When ComparePrices was clicked; cache entries older than this are stale.</summary>
     private DateTime fetchClickedAtUtc;
+    private bool searchResultWasClosed;
+    private readonly HashSet<uint> timedOutMarketItems = new();
+    internal bool MarketFetchTimedOut(uint itemId) => timedOutMarketItems.Contains(itemId);
 
     /// <summary>Start of the current job's fetch phase; the planner only trusts data newer than this.</summary>
     internal DateTime JobFetchStartUtc { get; private set; }
@@ -140,6 +143,7 @@ public sealed unsafe class Executor : IDisposable
     /// <summary>Fork: every price actually written in this run, for the chat summary.</summary>
     public List<(string Retainer, uint ItemId, bool IsHq, long OldPrice, long NewPrice)> AppliedReprices { get; } = new();
     private static readonly TimeSpan SaddleSettleAfterStage = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan FetchRowCooldown = TimeSpan.FromMilliseconds(800);
 
     private DateTime nextStepNoEarlierThan = DateTime.MinValue;
     private static readonly TimeSpan StepThrottle = TimeSpan.FromMilliseconds(250);
@@ -452,6 +456,9 @@ public sealed unsafe class Executor : IDisposable
             listedRetainerKey = ActiveRetainerKey();
             foreach (var a in h.SameRetainerFollowUps) currentJobActions.Enqueue(a);
             TotalActions += h.SameRetainerFollowUps.Count;
+            var work = runEta!.WorkFor(CurrentJob);
+            runEta.SetWork(CurrentJob, work with { Listings = work.Listings + h.SameRetainerFollowUps.Count },
+                runClock.Elapsed, discovered: true);
         }
         State = ExecutionState.PerformingAction;
         Wait(TimeSpan.FromMilliseconds(500));
@@ -481,6 +488,7 @@ public sealed unsafe class Executor : IDisposable
     private void Begin(ExecutionMode mode, string? postprocessKey = null)
     {
         Mode = mode;
+        if (handover is { Done: true }) handover = null;
         autoRetainerKey = postprocessKey;
         postprocessOpenedSellList = false;
         if (mode == ExecutionMode.FullCycle) baitMatches.BeginCycle();
@@ -495,13 +503,9 @@ public sealed unsafe class Executor : IDisposable
         jobCursor = 0;
         CompletedJobs = 0;
         CompletedActions = 0;
-        TotalActions = jobs.Sum(j => j.Actions.Count);
+        partialFirstVisit = postprocessKey != null;
+        InitializeEta();
         runClock.Restart();
-        initialRunDuration = mode == ExecutionMode.FullCycle && postprocessKey == null && configuration.RecentCycleSeconds.Count > 0
-            ? AutoRetainerGate.ExpectedCycle(configuration.RecentCycleSeconds)
-            : null;
-        observedFetchJobs = 0;
-        pendingFetchJobs = jobs.Count(j => j.FetchPrices);
         cancelRequested = false;
         StatusMessage = null;
         waitingSince = null;
@@ -537,6 +541,7 @@ public sealed unsafe class Executor : IDisposable
             }
             if (RetainerVisitJob.StartAtActive(jobs, activeName))
             {
+                partialFirstVisit = true;
                 EnterJob();
                 State = jobs[0].NeedsSaddleStaging ? ExecutionState.PreStagingSaddle : ExecutionState.PerformingAction;
                 log.Info($"[Restocker] Executor start (smart): mode={mode}, jobs={jobs.Count}, actions={TotalActions}, starting at active retainer '{activeName}'");
@@ -546,6 +551,37 @@ public sealed unsafe class Executor : IDisposable
 
         State = ExecutionState.SelectingRetainer;
         log.Info($"[Restocker] Executor start: mode={mode}, jobs={jobs.Count}, actions={TotalActions}");
+    }
+
+    private void InitializeEta()
+    {
+        var characterId = Plugin.PlayerState.ContentId;
+        var work = new Dictionary<RetainerVisitJob, RunEtaWork>();
+        var timings = configuration.RunEtaTimings;
+        TotalActions = 0;
+        foreach (var job in jobs)
+        {
+            var snapshot = configuration.Snapshots.Values.FirstOrDefault(s =>
+                s.CharacterContentId == characterId && s.RetainerName == job.RetainerName);
+            var estimate = RunEtaWork.ForJob(job, timings, snapshot?.Listings ?? [], configuration.IsHeld);
+            work.Add(job, estimate);
+            TotalActions += estimate.Rows + estimate.Reprices + job.Actions.Count(a => a.Kind != PlannedActionKind.Reprice);
+        }
+        runEta = new RunEta(timings, work);
+    }
+
+    private void FinishVisit()
+    {
+        var learnOverhead = !partialFirstVisit && handover?.RetainerName != CurrentJob.RetainerName;
+        runEta!.FinishVisit(CurrentJob, runClock.Elapsed, learnOverhead);
+        partialFirstVisit = false;
+        CompletedJobs++;
+    }
+
+    private void SaveEtaTimings()
+    {
+        configuration.RunEtaTimings = runEta!.Timings;
+        configuration.Save();
     }
 
     public void Cancel()
@@ -945,9 +981,11 @@ public sealed unsafe class Executor : IDisposable
         foreach (var r in skippedSummaryRows)
         {
             var name = sheet.TryGetRow(r.ItemId, out var row) ? row.Name.ExtractText() : $"#{r.ItemId}";
-            if (r.Reason == RepriceReason.NoCompetitor)
+            if (r.Reason is RepriceReason.NoCompetitor or RepriceReason.NoData)
             {
-                Plugin.ChatPrint($"{name} [{r.Retainer} #{r.Slot}] kept {r.OldPrice:N0}, {Localization.Strings.NoCompetitor(r.Hq)}");
+                var reason = r.Reason == RepriceReason.NoData ? Strings.NoMarketData
+                    : configuration.MatchQuality.For(r.ItemId, r.Hq) ? Strings.NoCompetitor(r.Hq) : Strings.NoMarketCompetitor;
+                Plugin.ChatPrint($"{name} [{r.Retainer} #{r.Slot}] {string.Format(Strings.KeptPrice, r.OldPrice, reason)}");
                 continue;
             }
             var skipped = string.Format(Localization.Strings.SkippedPrice, RepriceRules.ReasonCode(r.Reason));
@@ -1016,10 +1054,11 @@ public sealed unsafe class Executor : IDisposable
         var unique = new HashSet<(uint, bool)>();
         foreach (var l in live) unique.Add((l.ItemId, l.IsHQ));
         fetchRows = new FetchRowQueue(live.Count, unique.Count);
+        timedOutMarketItems.Clear();
         JobFetchStartUtc = DateTime.UtcNow;
-        TotalActions += live.Count;
-        observedFetchJobs++;
-        pendingFetchJobs--;
+        var work = runEta!.WorkFor(CurrentJob);
+        TotalActions += live.Count - work.Rows;
+        runEta.SetWork(CurrentJob, work with { Rows = live.Count, Searches = unique.Count }, runClock.Elapsed, discovered: true);
         log.Information($"[Restocker] fetch phase: {jobs[jobCursor].RetainerName} rows={live.Count} unique={unique.Count}");
     }
 
@@ -1063,7 +1102,8 @@ public sealed unsafe class Executor : IDisposable
                 else
                     log.Information($"[Restocker] reprice decision ({reason}): {details}");
             },
-            baitMatches.IncludeBaitForPlan);
+            baitMatches.IncludeBaitForPlan,
+            MarketFetchTimedOut);
 
         lastBaitPrices[key] = plan.BaitPrices;
         ListingsHeld += plan.HeldCount;
@@ -1072,8 +1112,7 @@ public sealed unsafe class Executor : IDisposable
         {
             RepricesSkipped++;
             History?.Append(row);
-            if (row.Reason is RepriceReason.MaxDrop or RepriceReason.MaxRaise ||
-                (row.Reason == RepriceReason.NoCompetitor && configuration.MatchQuality.For(row.ItemId, row.Hq)))
+            if (row.Reason is RepriceReason.MaxDrop or RepriceReason.MaxRaise or RepriceReason.NoCompetitor or RepriceReason.NoData)
                 skippedSummaryRows.Add(row);
         }
         foreach (var b in plan.Baits)
@@ -1086,7 +1125,11 @@ public sealed unsafe class Executor : IDisposable
             Plugin.Instance?.PrintBaitMatchLink(msg, name, b);
         }
         foreach (var a in plan.Actions) currentJobActions.Enqueue(a);
-        TotalActions += plan.Actions.Count;
+        var work = runEta!.WorkFor(job);
+        var reprices = currentJobActions.Count(a => a.Kind == PlannedActionKind.Reprice);
+        TotalActions += reprices - work.Reprices;
+        runEta.SetWork(job, work with { Reprices = reprices }, runClock.Elapsed, discovered: true);
+        runEta.LearnRepriceShare(live.Count(l => !configuration.IsHeld(l.ItemId, l.IsHQ)), plan.Actions.Count);
         log.Information($"[Restocker] full cycle plan: {job.RetainerName} listings={live.Count} reprice={plan.Actions.Count} not-applied={plan.NotApplied.Count}");
     }
 
@@ -1146,6 +1189,7 @@ public sealed unsafe class Executor : IDisposable
                 // Expected item 0 = ignore every OfferingsReceived until the dialog tells us
                 // which item this row really is.
                 Plugin.Instance?.SetMarketWatcherExpected(0, false);
+                runEta!.StartAction(runClock.Elapsed);
                 ClickFetchListingSlot(fetchRows.CurrentRow);
                 return;
             }
@@ -1168,6 +1212,7 @@ public sealed unsafe class Executor : IDisposable
         }
 
         var action = currentJobActions.Peek();
+        runEta!.StartAction(runClock.Elapsed);
         switch (action.Kind)
         {
             case PlannedActionKind.FetchMarketPrice:
@@ -1186,6 +1231,7 @@ public sealed unsafe class Executor : IDisposable
                         ListingsHeld++;
                         RepricesSkipped++;
                         WriteHistory(action, action.OldPrice, false, RepriceReason.Held);
+                        runEta.FinishReprice(CurrentJob, runClock.Elapsed, StepThrottle);
                         Throttle();
                         return;
                     }
@@ -1194,6 +1240,7 @@ public sealed unsafe class Executor : IDisposable
                         log.Warning($"[Restocker] reprice skipped: price {action.UnitPrice:N0} is below the floor or outside the market API range");
                         RepricesSkipped++;
                         WriteHistory(action, action.UnitPrice, false, RepriceReason.Error);
+                        runEta.FinishReprice(CurrentJob, runClock.Elapsed, StepThrottle);
                         Throttle();
                         return;
                     }
@@ -1206,6 +1253,7 @@ public sealed unsafe class Executor : IDisposable
                         log.Warning($"[Restocker] reprice skipped: could not verify {action.RetainerKey} slot={action.ListingIndex} item={action.ItemId} hq={action.IsHQ}");
                         RepricesSkipped++;
                         WriteHistory(action, action.UnitPrice, false, RepriceReason.Error);
+                        runEta.FinishReprice(CurrentJob, runClock.Elapsed, StepThrottle);
                         Throttle();
                         return;
                     }
@@ -1233,6 +1281,7 @@ public sealed unsafe class Executor : IDisposable
                         log.Warning("[Restocker] NewListing: sell list, target retainer, or auto-restock settings no longer permit listing");
                         currentJobActions.Dequeue();
                         CompletedActions++;
+                        runEta.FinishListing(CurrentJob, runClock.Elapsed, StepThrottle);
                         Throttle();
                         return;
                     }
@@ -1245,6 +1294,7 @@ public sealed unsafe class Executor : IDisposable
                         log.Warning($"[Restocker] NewListing skip (direct listing failed): item={action.ItemId} hq={action.IsHQ}");
                         currentJobActions.Dequeue();
                         CompletedActions++;
+                        runEta.FinishListing(CurrentJob, runClock.Elapsed, StepThrottle);
                         Throttle();
                         return;
                     }
@@ -1284,6 +1334,7 @@ public sealed unsafe class Executor : IDisposable
         waitingSince ??= DateTime.UtcNow;
         var readback = RepriceReadbackCheck.Check(action.UnitPrice, sameSlot ? price : null, DateTime.UtcNow - waitingSince.Value, IsRunning);
         if (readback == RepriceReadback.Waiting) return;
+        if (IsRunning) runEta!.FinishReprice(CurrentJob, runClock.Elapsed);
         pendingReprice = null;
         waitingSince = null;
         if (readback == RepriceReadback.Unconfirmed)
@@ -1512,7 +1563,11 @@ public sealed unsafe class Executor : IDisposable
 
     private void SkipContextMenuAction()
     {
-        if (fetchRows != null) fetchRows.SkipCurrentRow();
+        if (fetchRows != null)
+        {
+            fetchRows.SkipCurrentRow();
+            FinishEtaRow(StepThrottle);
+        }
         else if (currentJobActions.Count > 0) currentJobActions.Dequeue();
         CompletedActions++;
         Plugin.Instance?.ClearMarketWatcherExpected();
@@ -1806,6 +1861,7 @@ public sealed unsafe class Executor : IDisposable
             {
                 log.Warning($"[Restocker] RetainerSell never opened for row {row}, skipping. (RetainerSellList open={AddonHelper.IsOpen("RetainerSellList")})");
                 fetchRows.SkipCurrentRow();
+                FinishEtaRow(StepThrottle);
                 CompletedActions++;
                 waitingSince = null;
                 fetchSlotClickRetried = false;
@@ -1843,7 +1899,9 @@ public sealed unsafe class Executor : IDisposable
         fetchItemId = resolvedItemId;
         fetchIsHq = resolvedIsHq;
         Plugin.Instance?.SetMarketWatcherExpected(resolvedItemId, resolvedIsHq);
+        searchResultWasClosed = !AddonHelper.IsOpen("ItemSearchResult");
         fetchClickedAtUtc = DateTime.UtcNow;
+        runEta!.StartSearch(runClock.Elapsed);
 
         // ComparePrices を click。AddonRetainerSell の event id 4
         Callback.Fire(addon, true, 4);
@@ -1859,10 +1917,23 @@ public sealed unsafe class Executor : IDisposable
         // cached entry, so a second fetch of the same item returned the previous result instantly.
         var scan = marketCache?.GetScan(fetchItemId);
         var ready = scan?.UpdatedUtc >= fetchClickedAtUtc;
+        var sr = AddonHelper.GetVisible("ItemSearchResult");
+        if (!ready && searchResultWasClosed && IsEmptyMarketResult((AddonItemSearchResult*)sr, fetchItemId)
+            && Plugin.Instance?.MarketWatcher.RecordEmptySearch(fetchItemId) == true)
+        {
+            scan = marketCache?.GetScan(fetchItemId);
+            ready = scan?.UpdatedUtc >= fetchClickedAtUtc;
+            log.Information($"[Restocker] ItemSearchResult confirmed an empty board for item={fetchItemId}");
+        }
         var timeout = DateTime.UtcNow - fetchClickedAtUtc > TimeSpan.FromSeconds(6);
         if (!ready && !timeout) return;
+        runEta!.FinishSearch(runClock.Elapsed);
 
-        if (!ready) log.Warning($"[Restocker] market fetch timeout for item={fetchItemId} hq={fetchIsHq} (ItemSearchResult open={AddonHelper.IsOpen("ItemSearchResult")})");
+        if (!ready)
+        {
+            timedOutMarketItems.Add(fetchItemId);
+            log.Warning($"[Restocker] market fetch timeout for item={fetchItemId} hq={fetchIsHq} (ItemSearchResult open={sr != null}); keeping price with no market data");
+        }
         else if (scan is { } fresh)
         {
             var key = ActiveRetainerKey();
@@ -1881,7 +1952,6 @@ public sealed unsafe class Executor : IDisposable
         Plugin.Instance?.SetMarketWatcherExpected(0, false);
 
         // ItemSearchResult を閉じる → RetainerSell に戻る
-        var sr = AddonHelper.GetVisible("ItemSearchResult");
         if (sr != null) Callback.Fire(sr, true, -1);
         // RetainerSell も Cancel で閉じる (価格変更は別フェーズで SetRetainerMarketPrice 直で行うので)
         var sell = AddonHelper.GetVisible("RetainerSell");
@@ -1891,6 +1961,24 @@ public sealed unsafe class Executor : IDisposable
         waitingSince = null;
         Throttle();
     }
+
+    private static bool IsEmptyMarketResult(AddonItemSearchResult* result, uint itemId)
+    {
+        if (result == null || !result->IsReady || result->Results == null || result->Results->ListLength != 0)
+            return false;
+        var agent = AgentItemSearch.Instance();
+        if (agent == null || agent->ResultItemId != itemId) return false;
+        var search = agent->InfoProxyItemSearch;
+        if (search == null || search->SearchItemId != itemId || search->WaitingForListings || search->ListingCount != 0)
+            return false;
+
+        // The empty list also exists while loading. Require the game's localized terminal message.
+        var emptyText = AddonText.NoMarketResults.Trim();
+        return emptyText.Length > 0 && (NodeShows(result->ErrorMessage, emptyText) || NodeShows(result->HitsMessage, emptyText));
+    }
+
+    private static bool NodeShows(AtkTextNode* node, string text)
+        => node != null && node->IsVisible() && ReadNodeText(node).Trim() == text;
 
     private void TickFetchAwaitingSellListAfter()
     {
@@ -1924,6 +2012,7 @@ public sealed unsafe class Executor : IDisposable
             // The ONLY row advance for a row whose dialog opened (fetch, duplicate or unresolved).
             var drained = fetchRows.CompleteCurrentRow();
             CompletedActions += 1 + drained;
+            FinishEtaRow(FetchRowCooldown);
             if (drained > 0)
                 log.Information($"[Restocker] all unique items fetched; draining {drained} duplicate row(s)");
         }
@@ -1931,8 +2020,11 @@ public sealed unsafe class Executor : IDisposable
         State = ExecutionState.PerformingAction;
         // 次の listing click までの cooldown。server 側の前リクエストの応答遅延が
         // 次の検索結果に紛れ込むのを抑えるため。
-        Wait(TimeSpan.FromMilliseconds(800));
+        Wait(FetchRowCooldown);
     }
+
+    private void FinishEtaRow(TimeSpan cooldown)
+        => runEta!.FinishRow(CurrentJob, fetchRows!.Remaining, fetchRows.RemainingSearches, runClock.Elapsed, cooldown);
 
     private void TickAwaitingNewListing()
     {
@@ -1961,6 +2053,7 @@ public sealed unsafe class Executor : IDisposable
                 }
                 CompletedActions++;
                 currentJobActions.Dequeue();
+                runEta!.FinishListing(CurrentJob, runClock.Elapsed, StepThrottle);
                 pendingListingSlot = -1;
                 waitingSince = null;
                 State = ExecutionState.PerformingAction;
@@ -1975,6 +2068,7 @@ public sealed unsafe class Executor : IDisposable
             log.Warning($"[Restocker] new listing not confirmed in market#{pendingListingSlot} for item={pendingListingItemId} hq={pendingListingIsHQ} qty={pendingListingQuantity} (server lag or rejected). Skipping.");
             currentJobActions.Dequeue();
             CompletedActions++;
+            runEta!.FinishListing(CurrentJob, runClock.Elapsed, StepThrottle);
             pendingListingSlot = -1;
             waitingSince = null;
             State = ExecutionState.PerformingAction;
@@ -2040,6 +2134,7 @@ public sealed unsafe class Executor : IDisposable
 
         var dequeued = currentJobActions.Dequeue();
         CompletedActions++;
+        runEta!.FinishListing(CurrentJob, runClock.Elapsed, StepThrottle);
         // 新規出品の場合、市場スロットは server が次に空いてるところを使うはずなので
         // 我々の usedMarketSlots 追跡は厳密には不要だが、Reprice 用に Reprice 経路は別
         State = ExecutionState.PerformingAction;
@@ -2191,8 +2286,9 @@ public sealed unsafe class Executor : IDisposable
                 || AddonHelper.IsOpen("ItemSearchResult") || !SelectStringHelper.HasEntry(AddonText.IsQuitEntry))
             { AwaitRetainerMenu("retainer quit menu"); return; }
             historyRetainerKey = null;
-            CompletedJobs++;
+            FinishVisit();
             State = ExecutionState.Done;
+            SaveEtaTimings();
             return;
         }
         if (!SelectStringHelper.ClickEntry(AddonText.IsQuitEntry)) { AwaitRetainerMenu("quit entry"); return; }
@@ -2208,7 +2304,7 @@ public sealed unsafe class Executor : IDisposable
             || !AddonHelper.IsOpen("RetainerList")) { AwaitRetainerMenu("RetainerList"); return; }
         waitingSince = null;
 
-        CompletedJobs++;
+        FinishVisit();
         jobCursor++;
         if (jobCursor >= jobs.Count)
         {
@@ -2220,6 +2316,7 @@ public sealed unsafe class Executor : IDisposable
             }
             PrintAutoRestockResults();
             State = ExecutionState.Done;
+            SaveEtaTimings();
             log.Info($"[Restocker] Executor done: {CompletedJobs} retainers, {CompletedActions} actions");
             // Full cycles print their own summary + lines (AutoCycleController); everything else here.
             if (Mode != ExecutionMode.FullCycle && AppliedReprices.Count > 0)
@@ -2259,7 +2356,10 @@ public sealed unsafe class Executor : IDisposable
         foreach (var group in plans.SelectMany(p => p.Actions).GroupBy(a => a.RetainerKey))
         {
             var actions = group.ToList();
-            jobs.Add(new RetainerVisitJob { RetainerName = autoRestockSnapshots[group.Key].RetainerName, Actions = actions });
+            var job = new RetainerVisitJob { RetainerName = autoRestockSnapshots[group.Key].RetainerName, Actions = actions };
+            jobs.Add(job);
+            runEta!.SetWork(job, RunEtaWork.ForJob(job, runEta.Timings, [], configuration.IsHeld),
+                runClock.Elapsed, discovered: true);
             TotalActions += actions.Count;
         }
         autoRestockPass = jobCursor < jobs.Count;

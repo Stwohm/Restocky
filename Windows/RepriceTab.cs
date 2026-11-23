@@ -359,8 +359,13 @@ public sealed class RepriceTab
             }
             if (!marketCache.HasDataSince(listing.ItemId, since))
             {
+                if (executor.MarketFetchTimedOut(listing.ItemId))
+                {
+                    editedPrice[EditKey(snap.Key, listing)] = (listing.UnitPrice, false);
+                    Plugin.ChatPrint($"{name} [{snap.RetainerName} #{listing.ListingIndex}] {string.Format(Strings.KeptPrice, listing.UnitPrice, Strings.NoMarketData)}");
+                }
                 // Fork: a new full-cycle prefill must not leave a stale proposal available to Add all.
-                if (respectHold) editedPrice.Remove(EditKey(snap.Key, listing));
+                else if (respectHold) editedPrice.Remove(EditKey(snap.Key, listing));
                 missing.Add((listing.ItemId, listing.IsHQ, name));
                 Plugin.Log.Information($"  slot={listing.ListingIndex} item={listing.ItemId} hq={listing.IsHQ} name='{name}' MISS (no fresh cache)");
                 continue;
@@ -385,9 +390,9 @@ public sealed class RepriceTab
             }
             if (lowest <= 0)
             {
-                if (matchQuality)
-                    Plugin.ChatPrint($"{name} [{snap.RetainerName} #{listing.ListingIndex}] kept {current:N0}, {Strings.NoCompetitor(listing.IsHQ)}");
-                if (respectHold || matchQuality) editedPrice[EditKey(snap.Key, listing)] = (decision.NewPrice, false);
+                var reason = matchQuality ? Strings.NoCompetitor(listing.IsHQ) : Strings.NoMarketCompetitor;
+                Plugin.ChatPrint($"{name} [{snap.RetainerName} #{listing.ListingIndex}] {string.Format(Strings.KeptPrice, current, reason)}");
+                editedPrice[EditKey(snap.Key, listing)] = (decision.NewPrice, false);
                 Plugin.Log.Information($"  slot={listing.ListingIndex} item={listing.ItemId} hq={listing.IsHQ} name='{name}' {competitor} (skipped, no data)");
                 continue;
             }
@@ -486,7 +491,7 @@ public sealed class RepriceTab
         const ImGuiTableColumnFlags fixedNoSort = ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoSort;
         ImGui.TableSetupColumn("##cheaper", fixedNoSort, 24);
         ImGui.TableSetupColumn(Strings.ColNewPrice, ImGuiTableColumnFlags.WidthStretch | ImGuiTableColumnFlags.NoSort, 0.2f);
-        ImGui.TableSetupColumn(Strings.ColProfit, fixedNoSort, 75);
+        ImGui.TableSetupColumn(Strings.ColProfit, fixedNoSort, 105);
         ImGui.TableSetupColumn(Strings.ColHold, fixedNoSort, 55);
         ImGui.TableSetupColumn("##fill", fixedNoSort, 70);
         var baitPrices = executor.LastBaitPricesFor(snap.Key);
@@ -526,8 +531,8 @@ public sealed class RepriceTab
             DrawPriceInput(editKey, l);
             ImGui.TableNextColumn();
             var returns = DrawProfit(l, editedPrice.GetValueOrDefault(editKey).Price);
-            profit += returns.Profit.GetValueOrDefault() * l.Quantity;
-            earning += returns.Earning.GetValueOrDefault() * l.Quantity;
+            profit += returns.Profit.GetValueOrDefault();
+            earning += returns.Earning.GetValueOrDefault();
             ImGui.TableNextColumn();
             DrawHoldCheckbox(snap.Key, l);
             ImGui.TableNextColumn();
@@ -590,13 +595,13 @@ public sealed class RepriceTab
         ImGui.EndTooltip();
     }
 
-    // Fork: show per-unit profit using the next lot's cost.
+    // Estimate the whole listing using the next lot's unit cost.
     private SaleReturn DrawProfit(ListingEntry listing, long edited)
     {
         var price = edited > 0 ? edited : listing.UnitPrice;
         var saleTaxRate = (decimal)configuration.SaleTaxPercent / 100m;
         var unitCost = costLedger.CurrentUnitCost(listing.ItemId, listing.IsHQ);
-        var returns = SaleReturn.Estimate(price, saleTaxRate, unitCost);
+        var returns = SaleReturn.Estimate(price, saleTaxRate, unitCost, listing.Quantity);
         if (returns.Profit is { } profit)
         {
             var color = profit > 0
@@ -606,7 +611,7 @@ public sealed class RepriceTab
         }
         else if (returns.Earning is { } earning)
         {
-            SaleReturnDisplay.DrawEarning(earning, "N0");
+            SaleReturnDisplay.DrawEarning(earning, "N0", string.Format(Strings.EarningPerUnit, earning / listing.Quantity));
             return returns;
         }
         else
@@ -617,7 +622,9 @@ public sealed class RepriceTab
 
         if (!ImGui.IsItemHovered()) return returns;
         ImGui.BeginTooltip();
-        var afterTax = returns.Profit.GetValueOrDefault() + unitCost.GetValueOrDefault();
+        var perUnit = returns.Profit.GetValueOrDefault() / listing.Quantity;
+        var afterTax = perUnit + unitCost.GetValueOrDefault();
+        ImGui.TextUnformatted(string.Format(Strings.ProfitPerUnit, perUnit));
         ImGui.TextUnformatted($"{Strings.CostUnitCost}  {unitCost?.ToString("N2") ?? "-"}");
         ImGui.TextUnformatted(string.Format(Strings.CostPriceAfterTax, saleTaxRate, afterTax));
         ImGui.TextUnformatted($"{Strings.CostWeightedAverage}  {costLedger.WeightedAverageCost(listing.ItemId, listing.IsHQ)?.ToString("N2") ?? "-"}");

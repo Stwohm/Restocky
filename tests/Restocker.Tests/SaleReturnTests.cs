@@ -7,10 +7,20 @@ public sealed class SaleReturnTests
     [Fact]
     public void EstimatesBothReturnsAfterConfiguredTax()
     {
-        Assert.Equal(default, SaleReturn.Estimate(0, 0.05m, 200m));
-        Assert.Equal(new SaleReturn(750m, null), SaleReturn.Estimate(1000, 0.05m, 200m));
-        Assert.Equal(new SaleReturn(null, 950m), SaleReturn.Estimate(1000, 0.05m, null));
-        Assert.Equal(new SaleReturn(950m, null), SaleReturn.Estimate(1000, 0.05m, 0m));
+        Assert.Equal(default, SaleReturn.Estimate(0, 0.05m, 200m, 1));
+        Assert.Equal(default, SaleReturn.Estimate(1000, 0.05m, 200m, 0));
+        Assert.Equal(new SaleReturn(750m, null), SaleReturn.Estimate(1000, 0.05m, 200m, 1));
+        Assert.Equal(new SaleReturn(null, 950m), SaleReturn.Estimate(1000, 0.05m, null, 1));
+        Assert.Equal(new SaleReturn(950m, null), SaleReturn.Estimate(1000, 0.05m, 0m, 1));
+    }
+
+    [Fact]
+    public void StackEstimatesScaleNetProceedsAndUnitCostBeforeRounding()
+    {
+        Assert.Equal(new SaleReturn(41758.2m, null), SaleReturn.Estimate(444, 0.05m, 0m, 99));
+        Assert.Equal(new SaleReturn(null, 41758.2m), SaleReturn.Estimate(444, 0.05m, null, 99));
+        Assert.Equal(new SaleReturn(29383.2m, null), SaleReturn.Estimate(444, 0.05m, 125m, 99));
+        Assert.Equal(new SaleReturn(-316.8m, null), SaleReturn.Estimate(444, 0.05m, 425m, 99));
     }
 
     [Fact]

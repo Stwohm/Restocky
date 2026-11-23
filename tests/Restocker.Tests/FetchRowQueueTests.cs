@@ -76,6 +76,20 @@ public class FetchRowQueueTests
     }
 
     [Fact]
+    public void Remaining_searches_exclude_duplicates_and_are_bounded_by_remaining_rows()
+    {
+        var q = new FetchRowQueue(3, 2);
+        q.OnDialogResolved(10, false);
+        q.CompleteCurrentRow();
+        Assert.Equal(1, q.RemainingSearches);
+        q.OnDialogResolved(10, false);
+        q.CompleteCurrentRow();
+        Assert.Equal(1, q.RemainingSearches);
+        q.SkipCurrentRow();
+        Assert.Equal(0, q.RemainingSearches);
+    }
+
+    [Fact]
     public void Hq_and_nq_of_same_item_are_distinct()
     {
         var q = new FetchRowQueue(2, 0);

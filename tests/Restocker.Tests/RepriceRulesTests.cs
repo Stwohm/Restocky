@@ -294,6 +294,22 @@ public class RepriceRulesTests
     }
 
     [Fact]
+    public void Auto_planner_keeps_price_on_market_timeout_and_uses_fresh_data_when_available()
+    {
+        LiveListing[] listings = [new(0, 12551, false, 99, 999), new(1, 7763, false, 1, 4659)];
+        var result = AutoRepricePlanner.Plan("k", "RetainerA", listings,
+            (item, _) => item == 7763 ? [new MarketOffer(4660, "Rival", 1)] : null,
+            (_, _) => 0, Default, DateTime.UtcNow, marketTimedOut: _ => true);
+
+        Assert.Empty(result.Actions);
+        Assert.Equal(RepriceReason.NoData, result.NotApplied[0].Reason);
+        Assert.Equal("no_data", RepriceRules.ReasonCode(result.NotApplied[0].Reason));
+        Assert.False(result.NotApplied[0].Applied);
+        Assert.Equal(999, result.NotApplied[0].NewPrice);
+        Assert.Equal(RepriceReason.NoChange, result.NotApplied[1].Reason);
+    }
+
+    [Fact]
     public void Auto_planner_held_listing_has_no_action_and_writes_held_history()
     {
         var listings = new List<LiveListing> { new(3, 100, true, 1, 99_999) };

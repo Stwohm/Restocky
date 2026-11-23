@@ -43,6 +43,7 @@ public sealed class FetchRowQueue
 
     public bool IsEmpty => rows.Count == 0;
     public int Remaining => rows.Count;
+    internal int RemainingSearches => Math.Clamp(uniqueTargets - fetched.Count, 0, Remaining);
     public int CurrentRow => rows.Count > 0 ? rows.Peek() : -1;
     public int FetchedCount => fetched.Count;
     public IReadOnlyCollection<(uint ItemId, bool IsHq)> Fetched => fetched;

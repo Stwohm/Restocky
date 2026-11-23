@@ -25,7 +25,7 @@ public enum RepriceReason
     /// <summary>No competitor listing on the board (only own retainers, or none).</summary>
     NoCompetitor,
 
-    /// <summary>Market data missing / slot mismatch / game call failed.</summary>
+    /// <summary>Fetch failed to reach a search, slot mismatched, or a game call failed.</summary>
     Error,
 
     /// <summary>Applied from the manual plan-then-apply table.</summary>
@@ -34,6 +34,7 @@ public enum RepriceReason
     /// <summary>Automatic cycles are disabled for this item and quality.</summary>
     Held,
     MaxRaise,
+    NoData,
 }
 
 public sealed class RepriceSettings
@@ -77,6 +78,7 @@ public static class RepriceRules
         RepriceReason.MaxRaise => "max_raise",
         RepriceReason.NoChange => "no_change",
         RepriceReason.NoCompetitor => "no_competitor",
+        RepriceReason.NoData => "no_data",
         RepriceReason.Error => "error",
         RepriceReason.Manual => "manual",
         RepriceReason.Held => "held",

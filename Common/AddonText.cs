@@ -130,6 +130,8 @@ public static class AddonText
     private static readonly Lazy<string> LegacyQuitRow = new(() => TryRow(2383));
     private static readonly Lazy<string> LegacyPutUpForSaleRow = new(() => TryRow(99));
 
+    internal static string NoMarketResults => TryRow(1959);
+
     private static string TryRow(uint rowId)
     {
         try { return SafeRowText(rowId); } catch { return string.Empty; }
