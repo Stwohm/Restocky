@@ -79,7 +79,7 @@ public sealed class AutoCycleController : IDisposable
     }
 
     internal void ListenForPostprocess() => ar.ListenForPostprocess(
-        () => configuration.RunFullCycleAfterAutoRetainer && !CycleRunning && !executor.IsRunning,
+        () => configuration.RunFullCycleAfterAutoRetainer && !Enabled && !CycleRunning && !executor.IsRunning,
         StartPostprocess, executor.InterruptAutoRetainerCycle);
 
     public void Dispose()
@@ -200,7 +200,9 @@ public sealed class AutoCycleController : IDisposable
 
     private bool StartPostprocess(string retainerName)
     {
-        if (!configuration.RunFullCycleAfterAutoRetainer || cycleRunning || ar.ReleasePending || executor.IsRunning) return false;
+        // Timed Auto cycle already reprices on its own schedule; the AR handoff is only for runs without it
+        // (e.g. GatherBuddy Reborn visiting the bell). User decision 2026-11-23.
+        if (!configuration.RunFullCycleAfterAutoRetainer || Enabled || cycleRunning || ar.ReleasePending || executor.IsRunning) return false;
         if (UnsafeReason() != null || !executor.StartAutoRetainerCycle(retainerName))
         {
             log.Information($"[Restocker] AutoRetainer postprocess skipped for '{retainerName}'");
