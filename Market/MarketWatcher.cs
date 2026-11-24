@@ -100,8 +100,11 @@ public sealed unsafe class MarketWatcher : IDisposable
         marketBoard.HistoryReceived -= OnHistoryReceived;
     }
 
-    private void OnHistoryReceived(IMarketBoardHistory history)
-        => OnFramework(() => RecordHistory(history));
+    internal DateTime LastOfferingsUtc => new(Interlocked.Read(ref lastOfferingsTicks), DateTimeKind.Utc);
+    private long lastOfferingsTicks;
+
+    internal bool HasHistoryAfter(uint itemId, DateTime since)
+        => saleHistory.TryGetValue((HomeWorldId, itemId), out var scan) && scan.ScannedUtc > since;
 
     private void OnFramework(Action record)
     {
@@ -112,23 +115,29 @@ public sealed unsafe class MarketWatcher : IDisposable
         });
     }
 
-    private void RecordHistory(IMarketBoardHistory history)
+    private void OnHistoryReceived(IMarketBoardHistory history)
     {
-        var player = objectTable.LocalPlayer;
-        var homeWorld = player?.HomeWorld.RowId ?? 0;
+        if (disposed) return;
+        var received = DateTime.UtcNow;
+        var homeWorld = Plugin.PlayerState.HomeWorld.RowId;
         var itemId = history.ItemId;
-        if (!MarketWorldGate.Accept(player?.CurrentWorld.RowId ?? 0, homeWorld)
-            || itemId == 0 || (expectedItemId is { } expected && expected != itemId)) return;
+        if (itemId == 0 || !MarketWorldGate.Accept(Plugin.PlayerState.CurrentWorld.RowId, homeWorld)) return;
 
         var sales = history.HistoryListings
             .Where(s => s.SalePrice > 0 && s.Quantity is > 0 and <= int.MaxValue)
             .Select(s => new MarketSale(itemId, s.IsHq, (int)s.Quantity, s.SalePrice, s.PurchaseTime, s.BuyerName))
             .ToArray();
-        saleHistory[(homeWorld, itemId)] = new MarketSaleScan(DateTime.UtcNow, sales);
+        saleHistory[(homeWorld, itemId)] = new MarketSaleScan(received, sales);
+        log.Debug($"[Restocker] market history item={itemId} rows={history.HistoryListings.Count}");
     }
 
     private void OnOfferingsReceived(IMarketBoardCurrentOfferings offerings)
-        => OnFramework(() => RecordOffers(offerings));
+    {
+        if (disposed || offerings.ItemListings.Count == 0) return;
+        // API 15 discards the two page-index bytes. Track arrival even for ignored packets.
+        Interlocked.Exchange(ref lastOfferingsTicks, DateTime.UtcNow.Ticks);
+        OnFramework(() => RecordOffers(offerings));
+    }
 
     private void RecordOffers(IMarketBoardCurrentOfferings offerings)
     {

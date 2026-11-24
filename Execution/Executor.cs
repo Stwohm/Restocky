@@ -109,6 +109,8 @@ public sealed unsafe partial class Executor : IDisposable
 
     /// <summary>When ComparePrices was clicked; cache entries older than this are stale.</summary>
     private DateTime fetchClickedAtUtc;
+    private DateTime comparisonWaitStart;
+    private int comparisonRetries;
     private bool searchResultWasClosed;
     private readonly HashSet<uint> timedOutMarketItems = new();
     internal bool MarketFetchTimedOut(uint itemId) => timedOutMarketItems.Contains(itemId);
@@ -119,6 +121,8 @@ public sealed unsafe partial class Executor : IDisposable
     /// <summary>Bait notices already shown this session (key = BaitFinder.Key).</summary>
     private readonly HashSet<string> reportedBaits = new();
     private readonly BaitMatchOverrides baitMatches = new();
+    internal PriceMatchOverrides PriceMatches { get; } = new();
+    internal Dictionary<(string Retainer, int Slot, uint ItemId, bool IsHq), long> GuardedPrices { get; } = new();
     private readonly Dictionary<string, Dictionary<(int Slot, uint ItemId, bool IsHq), long>> lastBaitPrices = new();
 
     internal void QueueBaitMatch(uint itemId, bool isHq) => baitMatches.Queue(itemId, isHq);
@@ -324,7 +328,11 @@ public sealed unsafe partial class Executor : IDisposable
         Mode = mode;
         autoRetainerKey = postprocessKey;
         postprocessOpenedSellList = false;
-        if (mode == ExecutionMode.FullCycle) baitMatches.BeginCycle();
+        if (mode == ExecutionMode.FullCycle)
+        {
+            baitMatches.BeginCycle();
+            PriceMatches.BeginCycle();
+        }
         collectAutoRestock = mode == ExecutionMode.FullCycle && postprocessKey == null
             && configuration.AutoRestockDuringCycle
             && configuration.LowStock.Any(e => e.EffectiveRestockMode == StockRestockMode.Auto);
@@ -494,6 +502,7 @@ public sealed unsafe partial class Executor : IDisposable
                 case ExecutionState.AwaitingTopUp: TickTopUp(); break;
                 case ExecutionState.FetchAwaitingSellDialog: TickFetchAwaitingSellDialog(); break;
                 case ExecutionState.FetchAwaitingMarketData: TickFetchAwaitingMarketData(); break;
+                case ExecutionState.FetchAwaitingComparison: TickAwaitingComparison(); break;
                 case ExecutionState.FetchAwaitingSellListAfter: TickFetchAwaitingSellListAfter(); break;
                 case ExecutionState.ClosingSellList: TickClosingSellList(); break;
                 case ExecutionState.AwaitingSelectStringAfterSell: TickAwaitingSelectStringAfterSell(); break;
@@ -955,7 +964,7 @@ public sealed unsafe partial class Executor : IDisposable
             key,
             job.RetainerName,
             live,
-            (item, hq) => marketCache != null && marketCache.HasDataSince(item, since)
+            (item, hq) => marketCache != null && !MarketFetchTimedOut(item) && marketCache.HasDataSince(item, since)
                 ? marketCache.GetOffers(item, hq, configuration.MatchQuality.For(item, hq))
                 : null,
             (itemId, hq) => configuration.EffectiveFloorFor(itemId, hq, costLedger).Price,
@@ -964,6 +973,7 @@ public sealed unsafe partial class Executor : IDisposable
             configuration.IsHeld,
             (listing, decision, offers, dropped) =>
             {
+                GuardedPrices.Remove((key, listing.Slot, listing.ItemId, listing.IsHQ));
                 var matchQuality = configuration.MatchQuality.For(listing.ItemId, listing.IsHQ);
                 Plugin.Instance?.ListingScans.RecordDecision(key, listing.Slot, listing.ItemId, listing.IsHQ,
                     DateTime.UtcNow, decision, matchQuality, dropped);
@@ -976,7 +986,8 @@ public sealed unsafe partial class Executor : IDisposable
                     log.Information($"[Restocker] reprice decision ({reason}): {details}");
             },
             baitMatches.IncludeBaitForPlan,
-            MarketFetchTimedOut);
+            MarketFetchTimedOut,
+            PriceMatches.ForPlan);
 
         lastBaitPrices[key] = plan.BaitPrices;
         ListingsHeld += plan.HeldCount;
@@ -985,6 +996,12 @@ public sealed unsafe partial class Executor : IDisposable
         {
             RepricesSkipped++;
             AppendHistory(row);
+            if (row.Reason is RepriceReason.MaxDrop or RepriceReason.MaxRaise)
+            {
+                GuardedPrices[(key, row.Slot, row.ItemId, row.Hq)] = row.NewPrice;
+                Plugin.Instance?.PrintPriceMatchLink(row.ItemId, row.Hq, row.Retainer, row.OldPrice, row.NewPrice,
+                    row.Reason, PriceMatches.ForPlan(row.ItemId, row.Hq));
+            }
             if (row.Reason is RepriceReason.MaxDrop or RepriceReason.MaxRaise or RepriceReason.NoCompetitor or RepriceReason.NoData)
                 skippedSummaryRows.Add(row);
         }
@@ -1232,6 +1249,10 @@ public sealed unsafe partial class Executor : IDisposable
         }
 
         if (action.MatchedBait) baitMatches.Consume(action.ItemId, action.IsHQ);
+        else if (Mode == ExecutionMode.FullCycle) PriceMatches.Consume(action.ItemId, action.IsHQ);
+        if (action.MatchedPrice)
+            Plugin.ChatPrint(string.Format(Strings.PriceMatchApplied, Plugin.MarketItemName(action.ItemId, action.IsHQ),
+                action.OldPrice, price, RepriceRules.ChangePercent(action.OldPrice, price)));
         if (action.BypassedMaxDrop)
         {
             var sheet = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Item>();
@@ -1785,13 +1806,37 @@ public sealed unsafe partial class Executor : IDisposable
     {
         fetchItemId = itemId;
         fetchIsHq = isHq;
-        Plugin.Instance?.SetMarketWatcherExpected(itemId, isHq);
-        searchResultWasClosed = !AddonHelper.IsOpen("ItemSearchResult");
-        fetchClickedAtUtc = DateTime.UtcNow;
+        comparisonRetries = 0;
+        comparisonWaitStart = DateTime.UtcNow;
         if (!restockComparing) runEta!.StartSearch(runClock.Elapsed);
+        State = ExecutionState.FetchAwaitingComparison;
+        TryClickComparison(addon);
+    }
+
+    private void TickAwaitingComparison()
+    {
+        var addon = AddonHelper.GetVisible("RetainerSell");
+        if (addon != null && !AddonHelper.IsOpen("ItemSearchResult")
+            && ResolveItemFromDialogName(ReadNodeText(((AddonRetainerSell*)addon)->ItemName)) == (fetchItemId, fetchIsHq))
+        {
+            TryClickComparison(addon);
+            return;
+        }
+        if (DateTime.UtcNow - comparisonWaitStart >= TimeSpan.FromSeconds(4))
+            FinishMarketAttempt(null);
+    }
+
+    private void TryClickComparison(AtkUnitBase* addon)
+    {
+        var now = DateTime.UtcNow;
+        var lastPage = Plugin.Instance.MarketWatcher.LastOfferingsUtc;
+        if (MarketResultReadback.WaitBeforeClick(now - lastPage, now - comparisonWaitStart, comparisonRetries > 0)) return;
+        Plugin.Instance.SetMarketWatcherExpected(fetchItemId, fetchIsHq);
+        searchResultWasClosed = !AddonHelper.IsOpen("ItemSearchResult");
+        fetchClickedAtUtc = now;
 
         Callback.Fire(addon, true, 4);
-        log.Information($"[Restocker] clicked ComparePrices for item={itemId} hq={isHq}");
+        log.Information($"[Restocker] clicked ComparePrices for item={fetchItemId} hq={fetchIsHq}");
         State = ExecutionState.FetchAwaitingMarketData;
         waitingSince = fetchClickedAtUtc;
         Throttle();
@@ -1807,28 +1852,52 @@ public sealed unsafe partial class Executor : IDisposable
         var sr = AddonHelper.GetVisible("ItemSearchResult");
         if (sr == null) searchResultWasClosed = true;
         var result = (AddonItemSearchResult*)sr;
+        var error = searchResultWasClosed && result != null && result->IsReady
+            && (HasMarketMessage(result, AddonText.MarketSearchRetry) || HasMarketMessage(result, AddonText.MarketSearchRetryAlt));
+        var attempt = MarketResultReadback.Attempt(comparisonRetries, elapsed, error);
+        if (attempt == MarketAttemptDecision.Retry)
+        {
+            comparisonRetries++;
+            log.Information($"[Restocker] retry {comparisonRetries}/2 for ComparePrices item={fetchItemId} hq={fetchIsHq}");
+            Plugin.Instance.SetMarketWatcherExpected(0, false);
+            Callback.Fire(sr, true, -1);
+            comparisonWaitStart = DateTime.UtcNow;
+            State = ExecutionState.FetchAwaitingComparison;
+            return;
+        }
+        if (error)
+        {
+            FinishMarketAttempt(null);
+            return;
+        }
         if (!ready && searchResultWasClosed && TryReadMarketResult(result, elapsed))
         {
             scan = marketCache?.GetScan(fetchItemId);
             ready = scan?.UpdatedUtc >= fetchClickedAtUtc;
         }
-        var timeout = elapsed > TimeSpan.FromSeconds(6);
-        if (!ready && !timeout) return;
-        if (!ready) LogMarketResult(result, "timeout");
+        if (!ready && attempt == MarketAttemptDecision.Wait) return;
+        FinishMarketAttempt(ready ? scan : null);
+    }
+
+    private void FinishMarketAttempt((MarketScan Scan, DateTime UpdatedUtc)? scan)
+    {
+        var sr = AddonHelper.GetVisible("ItemSearchResult");
+        if (scan == null) LogMarketResult((AddonItemSearchResult*)sr, "no data");
         if (restockComparing)
         {
-            FinishRestockComparison(ready ? scan?.Scan : null);
+            FinishRestockComparison(scan?.Scan);
             return;
         }
         runEta!.FinishSearch(runClock.Elapsed);
 
-        if (!ready)
+        if (scan == null)
         {
             timedOutMarketItems.Add(fetchItemId);
-            log.Warning($"[Restocker] market fetch timeout for item={fetchItemId} hq={fetchIsHq} (ItemSearchResult open={sr != null}); keeping price with no market data");
+            log.Warning($"[Restocker] market fetch ended without data for item={fetchItemId} hq={fetchIsHq} (ItemSearchResult open={sr != null}); keeping price");
         }
         else if (scan is { } fresh)
         {
+            timedOutMarketItems.Remove(fetchItemId);
             var key = ActiveRetainerKey();
             var listingScans = Plugin.Instance?.ListingScans;
             foreach (var listing in ReadLiveListings())

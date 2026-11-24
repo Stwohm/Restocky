@@ -131,6 +131,9 @@ public static class AddonText
     private static readonly Lazy<string> LegacyPutUpForSaleRow = new(() => TryRow(99));
 
     internal static string NoMarketResults => TryRow(1959);
+    internal static string MarketSearchWaiting => TryRow(6841);
+    internal static string MarketSearchRetry => TryRow(1997);
+    internal static string MarketSearchRetryAlt => TryRow(1998);
 
     private static string TryRow(uint rowId)
     {

@@ -97,7 +97,7 @@ public sealed class ProgressWindow : Window
         ExecutionState.PreStagingSaddle => Strings.StatePreStagingSaddle,
         ExecutionState.AwaitingNewListing => Strings.StateAwaitingNewListing,
         ExecutionState.FetchAwaitingSellDialog => Strings.StateAwaitingSellDialog,
-        ExecutionState.FetchAwaitingMarketData => Strings.StateFetchAwaitingMarketData,
+        ExecutionState.FetchAwaitingComparison or ExecutionState.FetchAwaitingMarketData => Strings.StateFetchAwaitingMarketData,
         ExecutionState.FetchAwaitingSellListAfter => Strings.StateAwaitingSellList,
         ExecutionState.ClosingSellList => Strings.StateClosingSellList,
         ExecutionState.AwaitingSelectStringAfterSell => Strings.StateAwaitingSelectString,

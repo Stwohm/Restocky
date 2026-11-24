@@ -97,4 +97,5 @@ public enum ExecutionState
     /// <summary>Fork: wait for the fetch ContextMenu to close before retrying or advancing the row.</summary>
     FetchAwaitingContextMenuClose,
     AwaitingTopUp,
+    FetchAwaitingComparison,
 }

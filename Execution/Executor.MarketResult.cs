@@ -14,14 +14,18 @@ public sealed unsafe partial class Executor
         if (result == null || !result->IsReady || result->Results == null || Plugin.Instance == null) return false;
         var agent = AgentItemSearch.Instance();
         var search = agent != null ? agent->InfoProxyItemSearch : null;
-        var titleItem = ResolveItemFromDialogName(ReadNodeText(result->ItemName)).itemId;
+        var title = ReadNodeText(result->ItemName);
+        var titleItem = ResolveItemFromDialogName(title).itemId;
         if (titleItem != 0 ? titleItem != fetchItemId : agent == null || agent->ResultItemId != fetchItemId) return false;
 
         var rows = result->Results->ListLength;
         var proxyMatches = search != null && search->SearchItemId == fetchItemId;
         uint? proxyOffers = proxyMatches ? search->ListingCount : null;
         var watcher = Plugin.Instance.MarketWatcher;
-        if (rows == 0 && MarketResultReadback.IsEmpty(rows, proxyOffers, search != null && search->WaitingForListings, HasEmptyMarketMessage(result))
+        if (rows == 0 && MarketResultReadback.EmptyItemMatches(fetchItemId, titleItem, agent != null ? agent->ResultItemId : 0, title)
+            && MarketResultReadback.IsEmpty(rows, proxyOffers, search != null && search->WaitingForListings,
+                HasMarketMessage(result, AddonText.NoMarketResults), HasMarketMessage(result, AddonText.MarketSearchWaiting),
+                watcher.HasHistoryAfter(fetchItemId, fetchClickedAtUtc), elapsed)
             && watcher.RecordEmptySearch(fetchItemId))
         {
             LogMarketResult(result, "confirmed empty");
@@ -39,9 +43,8 @@ public sealed unsafe partial class Executor
         return true;
     }
 
-    private static bool HasEmptyMarketMessage(AddonItemSearchResult* result)
+    private static bool HasMarketMessage(AddonItemSearchResult* result, string expected)
     {
-        var expected = AddonText.NoMarketResults.Trim();
         if (expected.Length == 0) return false;
         if (NodeShows(result->ErrorMessage, expected) || NodeShows(result->HitsMessage, expected)) return true;
 

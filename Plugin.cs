@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using Dalamud.Game.Command;
 using Dalamud.Game.Text.SeStringHandling;
 using Dalamud.Game.Text.SeStringHandling.Payloads;
 using Dalamud.IoC;
+using Dalamud.Utility;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using Dalamud.Interface.Windowing;
@@ -41,6 +43,10 @@ public sealed class Plugin : IDalamudPlugin
 
     private const string CommandName = "/restocky";
     private readonly Dictionary<(uint ItemId, bool IsHq), DalamudLinkPayload> baitMatchLinks = new();
+
+    // Bait link IDs have the high bit set. Price links carry their own item and reviewed price.
+    private const uint MatchNqPrice = 0x40000000;
+    private const uint MatchHqPrice = MatchNqPrice + 1;
 
     public static Configuration Configuration { get; private set; } = null!;
     public static Plugin Instance { get; private set; } = null!;
@@ -86,6 +92,8 @@ public sealed class Plugin : IDalamudPlugin
             Tracker.Tracker.ObserveCompetitors(item, true, scan.Competitors(true, Configuration.MatchQuality.For(item, true)), now, retainers);
         };
         Executor = new Executor(Framework, Log, Configuration, Costs.Ledger, MarketWatcher.Cache);
+        ChatGui.AddChatLinkHandler(MatchNqPrice, OnMatchPrice);
+        ChatGui.AddChatLinkHandler(MatchHqPrice, OnMatchPrice);
         Executor.History = new PriceHistoryLog(
             System.IO.Path.Combine(PluginInterface.GetPluginConfigDirectory(), "price-history.csv"));
         Executor.RunHistory = new RunReportHistory(
@@ -161,6 +169,8 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.Draw -= WindowSystem.Draw;
         PluginInterface.UiBuilder.OpenMainUi -= ToggleMainUi;
         PluginInterface.UiBuilder.OpenConfigUi -= ToggleMainUi;
+        ChatGui.RemoveChatLinkHandler(MatchNqPrice);
+        ChatGui.RemoveChatLinkHandler(MatchHqPrice);
         foreach (var link in baitMatchLinks.Values)
             ChatGui.RemoveChatLinkHandler(link.CommandId);
 
@@ -217,16 +227,53 @@ public sealed class Plugin : IDalamudPlugin
             var displayName = notice.IsHq ? $"{itemName} (HQ)" : itemName;
             link = ChatGui.AddChatLinkHandler(BaitMatchOverrides.LinkId(key.ItemId, key.IsHq), (_, _) =>
             {
+                if (Configuration.IsHeld(key.ItemId, key.IsHq)) return;
                 Executor.QueueBaitMatch(key.ItemId, key.IsHq);
                 ChatPrint(string.Format(Strings.BaitMatchQueued, displayName));
             });
             baitMatchLinks.Add(key, link);
         }
 
+        PrintMatchLink(message, link, Strings.MatchBait);
+    }
+
+    internal static string MarketItemName(uint item, bool hq)
+    {
+        var sheet = DataManager.GetExcelSheet<Lumina.Excel.Sheets.Item>();
+        var name = sheet.TryGetRow(item, out var row) ? row.Name.ExtractText() : $"#{item}";
+        return hq ? $"{name} (HQ)" : name;
+    }
+
+    internal void PrintPriceMatchLink(uint item, bool hq, string retainer, long current, long proposed,
+        RepriceReason reason, long? rejectedReview = null)
+    {
+        if (!Executor.PriceMatches.ShouldReport(item, hq, reason, proposed, rejectedReview)) return;
+        var message = $"{MarketItemName(item, hq)} [{retainer}] {Strings.PriceWarning(reason, current, proposed)}";
+        var encoded = new Lumina.Text.SeStringBuilder().PushDalamudLink(hq ? MatchHqPrice : MatchNqPrice,
+            PluginInterface.InternalName, checked((int)item), 0, proposed.ToString(CultureInfo.InvariantCulture));
+        // The chat dispatcher expects the typed payload's wire encoding in API 15.
+        if (!encoded.ToReadOnlySeString().Single().TryReadDalamudLink(out var link)) return;
+        PrintMatchLink(message, link, Strings.MatchPrice);
+    }
+
+    private void OnMatchPrice(uint command, SeString message)
+    {
+        if (message.Payloads.FirstOrDefault() is not DalamudLinkPayload { Extra1: > 0 } link
+            || !long.TryParse(link.ExtraString, NumberStyles.None, CultureInfo.InvariantCulture, out var proposed)
+            || proposed <= 0) return;
+        var item = (uint)link.Extra1;
+        var hq = command == MatchHqPrice;
+        if (Configuration.IsHeld(item, hq)) return;
+        Executor.PriceMatches.Queue(item, hq, proposed);
+        ChatPrint(string.Format(Strings.PriceMatchQueued, MarketItemName(item, hq), proposed));
+    }
+
+    private static void PrintMatchLink(string message, Payload link, string label)
+    {
         PrintChatMessage(new SeStringBuilder()
             .AddText($"[Restocky] {message} ")
             .Add(link)
-            .AddUiForeground($"[{Strings.MatchBait}]", 45)
+            .AddUiForeground($"[{label}]", 45)
             .Add(RawPayload.LinkTerminator)
             .Build());
     }

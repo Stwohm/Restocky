@@ -59,6 +59,7 @@ public readonly record struct RepriceDecision(
     public bool MarkForReview => Reason is RepriceReason.MaxDrop or RepriceReason.MaxRaise;
     public bool BypassedMaxDrop { get; init; }
     internal bool MatchedBait { get; init; }
+    internal bool MatchedPrice { get; init; }
     internal long ClampedFloor { get; init; }
 }
 
@@ -94,7 +95,8 @@ public static class RepriceRules
         IReadOnlyList<long> competitorPricesAscending,
         long floor,
         RepriceSettings settings,
-        bool includeBait = false)
+        bool includeBait = false,
+        long? reviewedPrice = null)
     {
         if (competitorPricesAscending.Count == 0)
             return new RepriceDecision(currentPrice, false, RepriceReason.NoCompetitor, 0);
@@ -124,6 +126,10 @@ public static class RepriceRules
         {
             if (matchedBait && limit == RepriceReason.MaxDrop)
                 return new RepriceDecision(target, true, reason, picked) { BypassedMaxDrop = true, MatchedBait = true, ClampedFloor = clampedFloor };
+            if (!matchedBait && reviewedPrice is > 0
+                && Math.Sign(target - currentPrice) == Math.Sign(reviewedPrice.Value - currentPrice)
+                && Math.Abs(target - currentPrice) <= Math.Abs(reviewedPrice.Value - currentPrice) + reviewedPrice.Value * 0.05m)
+                return new RepriceDecision(target, true, reason, picked) { MatchedPrice = true, ClampedFloor = clampedFloor };
             return new RepriceDecision(target, false, limit, picked) { ClampedFloor = clampedFloor };
         }
 

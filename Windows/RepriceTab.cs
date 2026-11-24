@@ -346,8 +346,8 @@ public sealed class RepriceTab
         {
             var matchQuality = configuration.MatchQuality.For(listing.ItemId, listing.IsHQ);
             var held = respectHold && configuration.IsHeld(listing.ItemId, listing.IsHQ);
-            var freshData = marketCache.HasDataSince(listing.ItemId, since);
-            var timedOut = !freshData && executor.MarketFetchTimedOut(listing.ItemId);
+            var timedOut = executor.MarketFetchTimedOut(listing.ItemId);
+            var freshData = !timedOut && marketCache.HasDataSince(listing.ItemId, since);
             var floor = configuration.EffectiveFloorFor(listing.ItemId, listing.IsHQ, costLedger);
             var offers = !held && freshData ? marketCache.GetOffers(listing.ItemId, listing.IsHQ, matchQuality) : [];
             var decision = held || !freshData
@@ -370,6 +370,8 @@ public sealed class RepriceTab
                 }, prefill: true);
             if (!visible) continue;
 
+            var guardKey = (snap.Key, listing.ListingIndex, listing.ItemId, listing.IsHQ);
+            executor.GuardedPrices.Remove(guardKey);
             var baitKey = (listing.ListingIndex, listing.ItemId, listing.IsHQ);
             baitPrices.Remove(baitKey);
             seen.Add((listing.ItemId, listing.IsHQ));
@@ -394,7 +396,7 @@ public sealed class RepriceTab
             }
             var current = listing.UnitPrice;
             var competitor = MarketOfferFormat.RepriceCompetitor(offers, matchQuality, lowest);
-            if (dropped.Count > 0)
+            if (dropped.Count > 0 && !configuration.IsHeld(listing.ItemId, listing.IsHQ))
             {
                 baitPrices[baitKey] = dropped[0].Price;
                 var notice = new BaitNotice(listing.ItemId, listing.IsHQ, snap.RetainerName, dropped, lowest);
@@ -415,7 +417,15 @@ public sealed class RepriceTab
             var newPrice = decision.NewPrice;
             editedPrice[EditKey(snap.Key, listing)] = (newPrice, floor.FromCost && decision.Reason == RepriceReason.Floor);
             if (decision.MarkForReview)
-                Plugin.ChatPrint($"{name} [{snap.RetainerName} #{listing.ListingIndex}] {Strings.PriceWarning(decision.Reason, current, newPrice)}");
+            {
+                if (configuration.IsHeld(listing.ItemId, listing.IsHQ))
+                    Plugin.ChatPrint($"{name} [{snap.RetainerName} #{listing.ListingIndex}] {Strings.PriceWarning(decision.Reason, current, newPrice)}");
+                else
+                {
+                    executor.GuardedPrices[guardKey] = newPrice;
+                    Plugin.Instance.PrintPriceMatchLink(listing.ItemId, listing.IsHQ, snap.RetainerName, current, newPrice, decision.Reason);
+                }
+            }
             applied++;
             Plugin.Log.Information($"  slot={listing.ListingIndex} item={listing.ItemId} hq={listing.IsHQ} name='{name}' current={current:N0} {competitor} -> new={newPrice:N0}");
         }
@@ -521,6 +531,8 @@ public sealed class RepriceTab
         ImGui.TableSetupColumn("##fill", fixedNoSort, 70);
         var baitPrices = executor.LastBaitPricesFor(snap.Key);
         var addWidth = baitPrices.Count > 0 ? ImGui.CalcTextSize(Strings.MatchBait).X + 2 * ImGui.GetStyle().FramePadding.X : 0;
+        if (executor.GuardedPrices.Count > 0)
+            addWidth = Math.Max(addWidth, ImGui.CalcTextSize(Strings.MatchPrice).X + 2 * ImGui.GetStyle().FramePadding.X);
         ImGui.TableSetupColumn("##add", fixedNoSort, Math.Max(60, addWidth));
         ImGui.TableHeadersRow();
 
@@ -861,7 +873,19 @@ public sealed class RepriceTab
     private void DrawAddPlanButton(RetainerSnapshot snap, ListingEntry l, string name, long bait)
     {
         var key = EditKey(snap.Key, l);
-        if (bait > 0)
+        var held = configuration.IsHeld(l.ItemId, l.IsHQ);
+        if (!held && executor.GuardedPrices.TryGetValue((snap.Key, l.ListingIndex, l.ItemId, l.IsHQ), out var proposed)
+            && proposed != l.UnitPrice && ImGui.SmallButton($"{Strings.MatchPrice}##price-{key}"))
+        {
+            var floor = configuration.EffectiveFloorFor(l.ItemId, l.IsHQ, costLedger);
+            var priceToFill = Math.Max(proposed, floor.Price);
+            if (editedPrice.GetValueOrDefault(key).Item1 != priceToFill)
+            {
+                editedPrice[key] = (priceToFill, floor.FromCost && priceToFill == floor.Price);
+                RemovePlanIfExists(snap.Key, l.ListingIndex);
+            }
+        }
+        if (!held && bait > 0)
         {
             if (ImGui.SmallButton($"{Strings.MatchBait}##bait-{key}"))
             {

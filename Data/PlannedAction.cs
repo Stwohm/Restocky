@@ -51,6 +51,7 @@ public sealed class PlannedAction
     public Restocker.Market.RepriceReason Reason { get; set; } = Restocker.Market.RepriceReason.Manual;
     internal bool BypassedMaxDrop { get; set; }
     internal bool MatchedBait { get; set; }
+    internal bool MatchedPrice { get; set; }
     internal long ClampedFloor { get; set; }
 
     /// <summary>Competitor retainers below our old price when planned, ';'-separated.</summary>
