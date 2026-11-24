@@ -1811,7 +1811,9 @@ public sealed unsafe partial class Executor : IDisposable
         fetchItemId = itemId;
         fetchIsHq = isHq;
         comparisonRetries = 0;
-        comparisonWaitStart = DateTime.UtcNow;
+        comparisonWaitStart = fetchClickedAtUtc = DateTime.UtcNow;
+        // Accept this item's offers from now on: another plugin may start the search as soon as the dialog opens.
+        Plugin.Instance?.SetMarketWatcherExpected(itemId, isHq);
         if (!restockComparing) runEta!.StartSearch(runClock.Elapsed);
         State = ExecutionState.FetchAwaitingComparison;
         TryClickComparison(addon);
@@ -1820,6 +1822,16 @@ public sealed unsafe partial class Executor : IDisposable
     private void TickAwaitingComparison()
     {
         var addon = AddonHelper.GetVisible("RetainerSell");
+        if (addon != null && comparisonRetries == 0 && AddonHelper.IsOpen("ItemSearchResult"))
+        {
+            // Another plugin (Marketbuddy: auto-open Compare prices) started this row's search.
+            // The previous row's window was closed before this dialog opened, so use it instead of clicking.
+            log.Information($"[Restocker] using the search already open for item={fetchItemId} hq={fetchIsHq}");
+            searchResultWasClosed = true;
+            State = ExecutionState.FetchAwaitingMarketData;
+            waitingSince = DateTime.UtcNow;
+            return;
+        }
         if (addon != null && !AddonHelper.IsOpen("ItemSearchResult")
             && ResolveItemFromDialogName(ReadNodeText(((AddonRetainerSell*)addon)->ItemName)) == (fetchItemId, fetchIsHq))
         {
