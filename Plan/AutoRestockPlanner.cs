@@ -73,6 +73,28 @@ internal static class AutoRestockPlanner
         return plans;
     }
 
+    internal static bool CompleteVisitRoster(RetainerSnapshot? active, IReadOnlyCollection<RetainerSnapshot> roster,
+        int expectedCount) => active != null && roster.Count == expectedCount && roster.Contains(active)
+        && roster.All(r => r.CharacterContentId == active.CharacterContentId && r.LastRefreshedUtc != DateTime.MinValue);
+
+    internal static List<AutoRestockPlan> ForVisit(IEnumerable<AutoRestockPlan> plans,
+        RetainerSnapshot active, RetainerSnapshot first)
+    {
+        var result = new List<AutoRestockPlan>();
+        foreach (var plan in plans)
+        {
+            if (plan.Actions.Count == 0)
+            {
+                // Assign character-wide skips to one stable visit.
+                if ((plan.RetainerName ?? first.RetainerName) == active.RetainerName) result.Add(plan);
+                continue;
+            }
+            var actions = plan.Actions.FindAll(a => a.RetainerKey == active.Key);
+            if (actions.Count > 0) result.Add(plan with { Actions = actions });
+        }
+        return result;
+    }
+
     internal static List<RestockSource> Sources(uint itemId, bool hq, IEnumerable<RetainerSnapshot> retainers,
         CharacterSnapshot? character)
     {

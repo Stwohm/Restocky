@@ -65,8 +65,12 @@ public sealed unsafe partial class Executor : IDisposable
     private DateTime historyDeadline;
     private readonly Queue<PlannedAction> currentJobActions = new();
     private bool collectAutoRestock;
+    internal bool InAutoRestockPass => autoRestockPass;
+    // If the closing read fails, a later handoff must wait for a newer snapshot.
+    private readonly HashSet<string> pendingHandoffSnapshots = new();
     private string? autoRetainerKey;
     private bool postprocessOpenedSellList;
+    private bool unconfirmedHandoffListing;
     private bool autoRestockPass;
     private readonly Dictionary<string, RetainerSnapshot> autoRestockSnapshots = new();
     private readonly Queue<int> slotsToReadPrice = new();
@@ -291,9 +295,7 @@ public sealed unsafe partial class Executor : IDisposable
 
     internal void InterruptAutoRetainerCycle()
     {
-        if (autoRetainerKey == null) return;
-        autoRetainerKey = null;
-        if (IsRunning) Stop(Strings.AutoRetainerCycleStopped);
+        EndAutoRetainerCycle(Strings.AutoRetainerCycleStopped);
     }
 
     public void StartApplyActions(IEnumerable<PlannedAction> actions)
@@ -328,12 +330,13 @@ public sealed unsafe partial class Executor : IDisposable
         Mode = mode;
         autoRetainerKey = postprocessKey;
         postprocessOpenedSellList = false;
+        unconfirmedHandoffListing = false;
         if (mode == ExecutionMode.FullCycle)
         {
             baitMatches.BeginCycle();
             PriceMatches.BeginCycle();
         }
-        collectAutoRestock = mode == ExecutionMode.FullCycle && postprocessKey == null
+        collectAutoRestock = mode == ExecutionMode.FullCycle
             && configuration.AutoRestockDuringCycle
             && configuration.LowStock.Any(e => e.EffectiveRestockMode == StockRestockMode.Auto);
         autoRestockPass = false;
@@ -539,7 +542,7 @@ public sealed unsafe partial class Executor : IDisposable
         if (pendingTopUp != null) FailTopUp(reason);
         State = ExecutionState.Stopped;
         StatusMessage = reason;
-        if (restockComparing) CloseRestockComparison();
+        if (restockComparing && (autoRetainerKey == null || autoRetainerKey == ActiveRetainerKey())) CloseRestockComparison();
         restockComparing = false;
         fetchRows = null;
         fetchRowsPending = false;
@@ -1203,6 +1206,7 @@ public sealed unsafe partial class Executor : IDisposable
                     }
                     // server 反映を確認するまで次に進まない (race condition で動作不良になるため)
                     listedRetainerKey = action.RetainerKey;
+                    if (autoRetainerKey != null) pendingHandoffSnapshots.Add(action.RetainerKey);
                     pendingListingSlot = dstSlot;
                     pendingListingItemId = action.ItemId;
                     pendingListingIsHQ = action.IsHQ;
@@ -2006,6 +2010,8 @@ public sealed unsafe partial class Executor : IDisposable
         if (!IsRunning || DateTime.UtcNow - waitingSince.Value > TimeSpan.FromSeconds(8))
         {
             log.Warning($"[Restocker] new listing not confirmed in market#{pendingListingSlot} for item={pendingListingItemId} hq={pendingListingIsHQ} qty={pendingListingQuantity} (server lag or rejected). Skipping.");
+            // A late server write could still arrive after the closing snapshot.
+            if (autoRetainerKey != null) unconfirmedHandoffListing = true;
             CompleteListing(IsRunning ? RestockSkipReason.TimedOut : RestockSkipReason.Unconfirmed);
         }
     }
@@ -2077,7 +2083,21 @@ public sealed unsafe partial class Executor : IDisposable
 
     private void TickClosingSellList()
     {
+        if (autoRetainerKey != null && (AddonHelper.IsOpen("ContextMenu") || AddonHelper.IsOpen("RetainerSell")
+            || AddonHelper.IsOpen("ItemSearchResult")))
+        {
+            CloseRestockComparison();
+            AwaitRetainerMenu("restock dialogs to close");
+            Throttle();
+            return;
+        }
         CaptureListingsAfterActions();
+        if (listedRetainerKey != null && autoRetainerKey != null)
+        {
+            AwaitRetainerMenu("updated retainer listings");
+            Throttle();
+            return;
+        }
         var addon = AddonHelper.GetVisible("RetainerSellList");
         if (addon != null && collectAutoRestock && !autoRestockPass && configuration.AutoRestockDuringCycle)
         {
@@ -2085,9 +2105,18 @@ public sealed unsafe partial class Executor : IDisposable
             {
                 var snapshot = Plugin.Instance.RetainerWatcher.CaptureActiveRetainerSnapshot(authoritative: true);
                 if (snapshot != null && snapshot.RetainerName == jobs[jobCursor].RetainerName)
+                {
                     autoRestockSnapshots[snapshot.Key] = snapshot;
+                    pendingHandoffSnapshots.Remove(snapshot.Key);
+                }
             }
             catch (Exception ex) { log.Warning(ex, "[Restocker] auto-restock snapshot capture failed"); }
+        }
+        if (autoRetainerKey != null && TryQueueAutoRestock())
+        {
+            State = CurrentJob.NeedsSaddleStaging ? ExecutionState.PreStagingSaddle : ExecutionState.PerformingAction;
+            Throttle();
+            return;
         }
         if (addon == null)
         {
@@ -2105,12 +2134,13 @@ public sealed unsafe partial class Executor : IDisposable
     private void CaptureListingsAfterActions()
     {
         var key = listedRetainerKey;
-        listedRetainerKey = null;
         if (string.IsNullOrEmpty(key) || key != ActiveRetainerKey() || !AddonHelper.IsOpen("RetainerSellList")) return;
         try
         {
-            Plugin.Instance?.RetainerWatcher.CaptureActiveRetainerSnapshot(authoritative: true);
-            Plugin.Instance?.RetainerWatcher.CaptureCharacterSnapshot();
+            if (Plugin.Instance?.RetainerWatcher.CaptureActiveRetainerSnapshot(authoritative: true)?.Key != key) return;
+            listedRetainerKey = null;
+            if (!unconfirmedHandoffListing) pendingHandoffSnapshots.Remove(key);
+            Plugin.Instance.RetainerWatcher.CaptureCharacterSnapshot();
         }
         catch (Exception ex) { log.Warning(ex, "[Restocker] snapshot refresh after listing failed"); }
     }
@@ -2217,9 +2247,10 @@ public sealed unsafe partial class Executor : IDisposable
         if (autoRetainerKey != null)
         {
             if (AddonHelper.IsOpen("RetainerSellList") || AddonHelper.IsOpen("RetainerSell")
-                || AddonHelper.IsOpen("ItemSearchResult") || !SelectStringHelper.HasEntry(AddonText.IsQuitEntry))
+                || AddonHelper.IsOpen("ItemSearchResult") || AddonHelper.IsOpen("ContextMenu") || !SelectStringHelper.HasEntry(AddonText.IsQuitEntry))
             { AwaitRetainerMenu("retainer quit menu"); return; }
             historyRetainerKey = null;
+            PrintAutoRestockResults();
             FinishVisit();
             State = ExecutionState.Done;
             RunHistory?.Finish(DateTime.UtcNow, Strings.RunCompleted);
@@ -2269,17 +2300,30 @@ public sealed unsafe partial class Executor : IDisposable
     private bool TryQueueAutoRestock()
     {
         if (!collectAutoRestock || autoRestockPass || !configuration.AutoRestockDuringCycle) return false;
-        if (autoRestockSnapshots.Count != jobs.Count)
+        collectAutoRestock = false;
+        IReadOnlyCollection<RetainerSnapshot> retainers = autoRestockSnapshots.Values;
+        RetainerSnapshot? active = null;
+        if (autoRetainerKey != null)
+        {
+            var manager = RetainerManager.Instance();
+            retainers = Plugin.Instance.LowStock.CurrentRetainers();
+            autoRestockSnapshots.TryGetValue(autoRetainerKey, out active);
+            if (manager == null || !manager->IsReady
+                || !AutoRestockPlanner.CompleteVisitRoster(active, retainers, manager->GetRetainerCount())
+                || retainers.Any(r => pendingHandoffSnapshots.Contains(r.Key)))
+                active = null;
+        }
+        if (autoRestockSnapshots.Count != jobs.Count || (autoRetainerKey != null && active == null))
         {
             Plugin.ChatPrint(Strings.AutoRestockIncompleteSnapshots);
             RunHistory?.Add(new RunEntry(string.Empty, RunEntryKind.RestockSkipped, Strings.AutoRestockIncompleteSnapshots));
             return false;
         }
 
-        Plugin.Instance.RetainerWatcher.CaptureCharacterSnapshot();
-        configuration.Characters.TryGetValue(CharacterSnapshot.MakeKey(Plugin.PlayerState.ContentId), out var character);
-        var plans = AutoRestockPlanner.Plan(configuration.LowStock, autoRestockSnapshots.Values, character,
+        var character = Plugin.Instance.RetainerWatcher.CaptureCharacterSnapshot(loadedOnly: active != null);
+        var plans = AutoRestockPlanner.Plan(configuration.LowStock, retainers, character,
             Plugin.Instance.Tracker.Tracker, configuration.IsHeld, AutoRestockFloor);
+        if (active != null) plans = AutoRestockPlanner.ForVisit(plans, active, retainers.First());
         foreach (var plan in plans.Where(p => p.Actions.Count == 0))
         {
             var message = string.Format(Strings.AutoRestockSkipped, AutoRestockItemName(plan.ItemId, plan.IsHq),
@@ -2289,18 +2333,29 @@ public sealed unsafe partial class Executor : IDisposable
             RunHistory?.Add(new RunEntry(plan.RetainerName ?? string.Empty, RunEntryKind.RestockSkipped, message));
         }
 
-        foreach (var group in plans.SelectMany(p => p.Actions).GroupBy(a => a.RetainerKey))
+        var listings = plans.SelectMany(p => p.Actions).ToList();
+        if (listings.Count == 0) return false;
+        PrintPreferredRetainerFallbacks(listings);
+        TotalActions += listings.Count;
+        autoRestockPass = true;
+        if (active != null)
+        {
+            CurrentJob.Actions.AddRange(listings);
+            foreach (var action in listings) currentJobActions.Enqueue(action);
+            var work = runEta!.WorkFor(CurrentJob);
+            runEta.SetWork(CurrentJob, work with { Listings = work.Listings + listings.Count }, runClock.Elapsed, discovered: true);
+            return true;
+        }
+
+        foreach (var group in listings.GroupBy(a => a.RetainerKey))
         {
             var actions = group.ToList();
-            PrintPreferredRetainerFallbacks(actions);
             var job = new RetainerVisitJob { RetainerName = autoRestockSnapshots[group.Key].RetainerName, Actions = actions };
             jobs.Add(job);
             runEta!.SetWork(job, RunEtaWork.ForJob(job, runEta.Timings, [], configuration.IsHeld),
                 runClock.Elapsed, discovered: true);
-            TotalActions += actions.Count;
         }
-        autoRestockPass = jobCursor < jobs.Count;
-        return autoRestockPass;
+        return true;
     }
 
     internal void PrintPreferredRetainerFallbacks(IEnumerable<PlannedAction> actions)

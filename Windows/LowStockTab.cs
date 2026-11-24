@@ -26,6 +26,7 @@ public sealed class LowStockTab
     private readonly Dictionary<(uint, bool), int> restockTo = new();
     /// <summary>Price typed or picked for the next restock (session only).</summary>
     private readonly Dictionary<(uint, bool), RestockPrice> restockPrice = new();
+    private readonly HashSet<(uint, bool)> selected = new();
     private string? lastMessage;
 
     public LowStockTab(Configuration configuration, Executor executor, ConfirmDialog confirmDialog, LowStockService service)
@@ -96,9 +97,21 @@ public sealed class LowStockTab
         var cid = Plugin.PlayerState.ContentId;
         var retainers = service.CurrentRetainers();
         var retainerNames = retainers.Select(r => r.RetainerName).OrderBy(name => name).ToArray();
+        var ready = bellOpen && !executor.IsRunning;
+        ImGui.BeginDisabled(!ready);
+        var selectLow = ImGui.Button(Strings.StockSelectLow);
+        ImGui.EndDisabled();
+        ImGui.SameLine();
+        if (ImGui.Button(Strings.StockClearSelection)) selected.Clear();
+        ImGui.SameLine();
+        ImGui.BeginDisabled(!ready || selected.Count == 0);
+        if (ImGui.Button(string.Format(Strings.StockRestockSelected, selected.Count))) RestockSelected(cid);
+        ImGui.EndDisabled();
+
         const ImGuiTableFlags flags = ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY | ImGuiTableFlags.SizingStretchProp;
-        if (!ImGui.BeginTable("##lowstock", 8, flags, new Vector2(0, Math.Max(120f, ImGui.GetContentRegionAvail().Y)))) return;
+        if (!ImGui.BeginTable("##lowstock", 9, flags, new Vector2(0, Math.Max(120f, ImGui.GetContentRegionAvail().Y)))) return;
         ImGui.TableSetupScrollFreeze(0, 1);
+        ImGui.TableSetupColumn("##selected", ImGuiTableColumnFlags.WidthFixed, 21);
         ImGui.TableSetupColumn(Strings.StockItem, ImGuiTableColumnFlags.WidthStretch, 1);
         ImGui.TableSetupColumn(Strings.StockCounts, ImGuiTableColumnFlags.WidthFixed, 76);
         ImGui.TableSetupColumn(Strings.StockThreshold, ImGuiTableColumnFlags.WidthFixed, 49);
@@ -122,6 +135,14 @@ public sealed class LowStockTab
             var autoPrice = listed == 0;
 
             ImGui.TableNextRow();
+            ImGui.TableNextColumn();
+            var key = (e.ItemId, e.IsHq);
+            var checkedRow = selected.Contains(key);
+            if (ImGui.Checkbox($"##select-{id}", ref checkedRow))
+            {
+                if (checkedRow) selected.Add(key);
+                else selected.Remove(key);
+            }
             ImGui.TableNextColumn();
             if (low) ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.55f, 0.4f, 1f));
             ImGui.TextWrapped(ItemName(e.ItemId) + (e.IsHq ? " (HQ)" : ""));
@@ -165,7 +186,6 @@ public sealed class LowStockTab
 
             // Price for this restock: typed by the user, or picked from the market suggestion with "Use".
             ImGui.TableNextColumn();
-            var key = (e.ItemId, e.IsHq);
             if (autoPrice)
             {
                 ImGui.TextWrapped(Strings.StockMarketPricing);
@@ -226,11 +246,11 @@ public sealed class LowStockTab
                 configuration.Save();
             }
 
-            var ready = bellOpen && !executor.IsRunning;
             var chosenPrice = autoPrice || !ready ? default : restockPrice.TryGetValue(key, out var rp) ? rp : service.PriceForRestock(e);
             // Automatic pricing uses a placeholder while laying out the new listings.
             var actions = ready ? service.PlanRestock(e, to, autoPrice ? 1 : chosenPrice.UnitPrice, allowTopUps: !autoPrice) : [];
             var can = actions.Count > 0;
+            if (selectLow && low && can) selected.Add(key);
             if (!can) ImGui.BeginDisabled();
             if (ImGui.SmallButton($"{(autoPrice ? Strings.StockListAndPrice : Strings.StockRestock)}##rs-{id}"))
             {
@@ -253,6 +273,7 @@ public sealed class LowStockTab
 
         if (remove != null)
         {
+            selected.Remove((remove.ItemId, remove.IsHq));
             configuration.LowStock.Remove(remove);
             configuration.Save();
         }
@@ -384,20 +405,58 @@ public sealed class LowStockTab
         return changed;
     }
 
-    private void RestockAtMarket(List<PlannedAction> actions)
+    private void RestockSelected(ulong characterId)
+    {
+        var entries = configuration.LowStock.Where(e => selected.Contains((e.ItemId, e.IsHq)));
+        var batch = RestockPlanner.PlanBatch(entries, service.FreeListingSlots(), (entry, free) =>
+        {
+            var key = (entry.ItemId, entry.IsHq);
+            var market = service.ListedUnits(entry.ItemId, entry.IsHq) == 0;
+            var price = market ? default : restockPrice.TryGetValue(key, out var chosen) ? chosen : service.PriceForRestock(entry);
+            var actions = service.PlanRestock(entry, restockTo.GetValueOrDefault(key, entry.Target),
+                market ? 1 : price.UnitPrice, allowTopUps: !market, freeSlots: free);
+            if (market) SetMarketPricing(actions);
+            else SetRowPrice(actions, price);
+            return actions;
+        });
+        if (batch.Skipped.Count > 0)
+        {
+            var names = batch.Skipped.Select(e => ItemName(e.ItemId) + (e.IsHq ? " (HQ)" : ""));
+            Plugin.ChatPrint($"{Strings.StockNothingToRestock}: {string.Join(", ", names)}");
+        }
+        if (batch.Actions.Count == 0) return;
+        confirmDialog.Request(batch.Actions, actions =>
+        {
+            if (executor.IsRunning || Plugin.PlayerState.ContentId != characterId) return;
+            executor.StartApplyActions(actions);
+            if (executor.IsRunning) selected.ExceptWith(actions.Select(a => (a.ItemId, a.IsHQ)));
+        });
+    }
+
+    private static void SetMarketPricing(List<PlannedAction> actions)
     {
         foreach (var action in actions)
         {
             action.ResolveRestockPrice = true;
             action.UnitPrice = 0;
         }
+    }
+
+    private void RestockAtMarket(List<PlannedAction> actions)
+    {
+        SetMarketPricing(actions);
         confirmDialog.Request(actions, executor.StartApplyActions);
+    }
+
+    private static void SetRowPrice(List<PlannedAction> actions, RestockPrice price)
+    {
+        foreach (var action in actions.Where(a => a.TopUp == null))
+            action.RestockPrice = price;
     }
 
     private void Restock(LowStockEntry e, List<PlannedAction> actions, RestockPrice price)
     {
-        foreach (var action in actions.Where(a => a.TopUp == null))
-            action.RestockPrice = price;
+        SetRowPrice(actions, price);
         confirmDialog.Request(actions, list =>
         {
             var added = list.Where(a => a.TopUp == null).ToList();

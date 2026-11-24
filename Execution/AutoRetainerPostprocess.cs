@@ -27,7 +27,7 @@ internal sealed class AutoRetainerPostprocess
         return true;
     }
 
-    public bool TimedOut(long now) => deadline is { } end && now >= end;
+    public bool TimedOut(long now, bool restocking = false) => deadline is { } end && now >= end + (restocking ? TimeoutMs : 0);
 
     public bool TakeFinish()
     {

@@ -47,7 +47,7 @@ public sealed class AutoRetainerIpc
 
     internal bool HasPostprocess => postprocess.Active;
     internal bool ReleasePending => releasePending || postprocess.FinishPending;
-    internal bool PostprocessTimedOut => postprocess.TimedOut(Environment.TickCount64);
+    internal bool PostprocessTimedOut(bool restocking) => postprocess.TimedOut(Environment.TickCount64, restocking);
 
     internal bool PostprocessInterrupted()
     {

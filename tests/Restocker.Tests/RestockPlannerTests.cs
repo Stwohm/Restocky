@@ -7,6 +7,26 @@ namespace Restocker.Tests;
 
 public class RestockPlannerTests
 {
+    [Fact]
+    public void Batch_reserves_new_slots_only_and_plans_each_stock_pool_once()
+    {
+        var item = new LowStockEntry { ItemId = 1 };
+        var hq = new LowStockEntry { ItemId = 1, IsHq = true };
+        var other = new LowStockEntry { ItemId = 2 };
+        var seen = new List<int>();
+        var batch = RestockPlanner.PlanBatch([item, item, hq, other],
+            new Dictionary<string, int> { ["RetainerA"] = 2 }, (entry, free) =>
+            {
+                seen.Add(free["RetainerA"]);
+                if (free["RetainerA"] == 0) return [];
+                var listing = new PlannedAction { RetainerKey = "RetainerA", Kind = PlannedActionKind.NewListing };
+                return entry.IsHq ? [listing] : [new PlannedAction { Kind = PlannedActionKind.TopUp }, listing];
+            });
+        Assert.Equal(new[] { 2, 1, 0 }, seen);
+        Assert.Equal(3, batch.Actions.Count);
+        Assert.Same(other, Assert.Single(batch.Skipped));
+    }
+
     private const uint Twine = 50970;
 
     private static Dictionary<string, int> Free(int a = 20, int b = 20) => new() { ["A"] = a, ["B"] = b };

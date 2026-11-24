@@ -42,7 +42,7 @@ public sealed unsafe partial class Executor
     private InventoryType[] ListingSourceContainers(PlannedAction action)
     {
         var key = string.IsNullOrEmpty(action.SourceKey) ? action.RetainerKey : action.SourceKey;
-        return autoRestockPass || (action.StockRestock && HasTopUps) ? SourceContainersFor(key) : ResolveSearchOrder(key);
+        return autoRestockPass || (action.StockRestock && jobs.Exists(j => j.HasTopUpFor(action))) ? SourceContainersFor(key) : ResolveSearchOrder(key);
     }
 
     private static bool IsListingSource(InventoryItem* item, PlannedAction action)

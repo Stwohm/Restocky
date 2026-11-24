@@ -8,6 +8,24 @@ namespace Restocker.Tests;
 
 public class StackTopUpPlannerTests
 {
+    [Fact]
+    public void Mixed_visits_only_restrict_sources_for_the_quality_with_top_ups()
+    {
+        var topUp = new PlannedAction { RetainerKey = "RetainerA", Kind = PlannedActionKind.TopUp,
+            ItemId = 7, TopUp = new StackTopUp(1, 99, 0, 2, 0) };
+        var fixedPrice = new PlannedAction { RetainerKey = "RetainerB", Kind = PlannedActionKind.NewListing,
+            ItemId = 7, SourceKey = "char.1.bag", Quantity = 3, UnitPrice = 100 };
+        var market = new PlannedAction { RetainerKey = "RetainerB", Kind = PlannedActionKind.NewListing,
+            ItemId = 7, IsHQ = true, SourceKey = "char.1.saddle", Quantity = 1, ResolveRestockPrice = true };
+        var visits = RetainerVisitJob.GroupApplyActions([market, topUp, fixedPrice]);
+        Assert.Same(topUp, Assert.Single(visits[0]));
+        Assert.Equal(new[] { market, fixedPrice }, visits[1]);
+        Assert.Equal(5, Assert.Single(RestockPlanner.SaddleStagingNeeds(visits[0], visits[1])).Value);
+        var job = new RetainerVisitJob { RetainerName = "RetainerA", Actions = visits[0] };
+        Assert.True(job.HasTopUpFor(fixedPrice));
+        Assert.False(job.HasTopUpFor(market));
+    }
+
     private const uint Sand = 1;
 
     [Fact]

@@ -229,7 +229,7 @@ public sealed class AutoCycleController : IDisposable
         WaitingReason = null;
         if (executor.State == ExecutionState.Done && reason == null)
         {
-            // The handoff cannot perform a character-wide restock. Leave that cycle due.
+            // Only this retainer was visited. Other retainers may still need a scheduled restock.
             if (!configuration.AutoRestockDuringCycle
                 || !configuration.LowStock.Exists(e => e.EffectiveRestockMode == StockRestockMode.Auto))
                 RestartCountdown();
@@ -256,7 +256,7 @@ public sealed class AutoCycleController : IDisposable
             if (ar.HasPostprocess)
             {
                 if (!executor.IsRunning) FinishPostprocess();
-                else if (ar.PostprocessTimedOut) FinishPostprocess(Strings.AutoRetainerCycleTimeout);
+                else if (ar.PostprocessTimedOut(executor.InAutoRestockPass)) FinishPostprocess(Strings.AutoRetainerCycleTimeout);
                 else if (!configuration.RunFullCycleAfterAutoRetainer || UnsafeReason() != null)
                     FinishPostprocess(Strings.AutoRetainerCycleStopped);
                 else if (now >= nextArPollUtc)

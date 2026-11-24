@@ -344,6 +344,8 @@ public sealed class MainWindow : Window, IDisposable
             configuration.Save();
         }
 
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.AutoRestockVisitHint);
+
         var maxScanAge = configuration.AutoRestockMaxScanAgeHours;
         ImGui.SetNextItemWidth(120);
         if (ImGui.InputInt(Strings.AutoRestockScanAgeSetting, ref maxScanAge))

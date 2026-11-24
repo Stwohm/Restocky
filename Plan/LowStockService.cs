@@ -211,7 +211,11 @@ public sealed class LowStockService : IDisposable
         return string.Join("\n", lines);
     }
 
-    public List<PlannedAction> PlanRestock(LowStockEntry e, int targetUnits, long unitPrice, bool allowTopUps = true)
+    internal Dictionary<string, int> FreeListingSlots() => MyRetainers().ToDictionary(
+        s => s.Key, s => Math.Max(0, Planner.MaxListingSlots - s.Listings.Count));
+
+    public List<PlannedAction> PlanRestock(LowStockEntry e, int targetUnits, long unitPrice, bool allowTopUps = true,
+        IReadOnlyDictionary<string, int>? freeSlots = null)
     {
         var cid = Cid();
         if (cid == 0) return [];
@@ -234,7 +238,7 @@ public sealed class LowStockService : IDisposable
             listed += actions.Sum(a => a.TopUp!.AddedUnits);
         }
 
-        var free = retainers.ToDictionary(s => s.Key, s => Math.Max(0, Planner.MaxListingSlots - s.Listings.Count));
+        var free = freeSlots ?? retainers.ToDictionary(s => s.Key, s => Math.Max(0, Planner.MaxListingSlots - s.Listings.Count));
         actions.AddRange(RestockPlanner.Plan(e.ItemId, e.IsHq, targetUnits, listed, PerListing(e), unitPrice,
             sources, free, PreferredRetainers(e), e.PreferredRetainers.GetValueOrDefault(cid), retainers));
         return actions;

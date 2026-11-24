@@ -22,6 +22,9 @@ public sealed class RetainerVisitJob
     /// <summary>Fork: after fetching, plan Reprice actions with the price rules and run them.</summary>
     public bool AutoPlan { get; init; }
 
+    internal bool HasTopUpFor(PlannedAction action) =>
+        Actions.Any(a => a.TopUp != null && a.ItemId == action.ItemId && a.IsHQ == action.IsHQ);
+
     internal bool NeedsSaddleStaging => Actions.Any(UsesSaddle);
 
     internal static bool UsesSaddle(PlannedAction action) => action.TopUp is { SaddleUnits: > 0 }

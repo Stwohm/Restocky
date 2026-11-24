@@ -199,10 +199,12 @@ public sealed unsafe class RetainerWatcher : IDisposable
     /// <see cref="Configuration.Characters"/> に保存する。
     /// 召喚中リテイナーが居なくても呼べる（ベル開時など）。
     /// </summary>
-    public void CaptureCharacterSnapshot()
+    public void CaptureCharacterSnapshot() => CaptureCharacterSnapshot(loadedOnly: false);
+
+    internal CharacterSnapshot? CaptureCharacterSnapshot(bool loadedOnly)
     {
         var characterId = playerState.ContentId;
-        if (characterId == 0) return;
+        if (characterId == 0) return null;
         var localPlayer = objectTable.LocalPlayer;
         var name = localPlayer?.Name.TextValue ?? string.Empty;
 
@@ -228,6 +230,14 @@ public sealed unsafe class RetainerWatcher : IDisposable
         configuration.Save();
 
         log.Debug($"[Restocker] character snapshot updated: bag={snapshot.Bag.Count} saddle={snapshot.Saddlebag.Count} premium={snapshot.PremiumSaddlebag.Count}");
+        if (!loadedOnly) return snapshot;
+        return new CharacterSnapshot
+        {
+            CharacterContentId = characterId,
+            Bag = bag.Values.SelectMany(entries => entries).ToList(),
+            Saddlebag = saddle.Values.SelectMany(entries => entries).ToList(),
+            PremiumSaddlebag = premium.Values.SelectMany(entries => entries).ToList(),
+        };
     }
 
     internal static DateTime RetainerInventoryFreshness(RetainerSnapshot snapshot)

@@ -31,8 +31,10 @@ Fork changes and where they live:
   cycle at the bell, never persisted, stops on leave bell / move / combat / duty / cutscene /
   zone / duty pop / user cancel / N failures, always prints the reason to chat.
 - This deliberately relaxes upstream's "only write game state behind Apply + confirm" rule for the
-  two cycle paths. With **Auto-restock tracked stock during Full/Auto cycle** enabled (off by default),
-  the same exception covers new listings in one restock pass after all retainers have been repriced.
+  two cycle paths. With auto-restock enabled (off by default), the same exception covers new listings after
+  repricing. Full/Auto cycles restock after all retainers have been repriced. An AutoRetainer
+  handoff restocks only the active retainer before returning its menu. It counts the other
+  retainers' latest stored listings and skips the visit's restock if any snapshot is missing.
   Stock tracking thresholds and targets count units across the current character's retainers. The pass
   uses refreshed listings to plan quantities and free slots once, skips held item+quality pairs,
   and uses the existing listing executor and saddlebag pacing. Pricing uses the lowest current

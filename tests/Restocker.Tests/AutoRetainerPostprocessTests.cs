@@ -4,6 +4,16 @@ namespace Restocker.Tests;
 
 public sealed class AutoRetainerPostprocessTests
 {
+    [Fact]
+    public void Restock_pass_has_an_additional_bounded_timeout()
+    {
+        var handoff = new AutoRetainerPostprocess();
+        handoff.OnOffer(true);
+        handoff.OnGrant(true, 0);
+        Assert.False(handoff.TimedOut(600_000, restocking: true));
+        Assert.True(handoff.TimedOut(1_200_000, restocking: true));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

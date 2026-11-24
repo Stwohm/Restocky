@@ -9,6 +9,44 @@ namespace Restocker.Tests;
 public class AutoRestockPlannerTests
 {
     private const uint Twine = 50970;
+    [Fact]
+    public void Handoff_counts_previous_visit_and_reports_unassigned_skips_once()
+    {
+        var a = Retainer("RetainerA");
+        var b = Retainer("RetainerB");
+        a.RetainerName = a.Key;
+        b.RetainerName = b.Key;
+        a.Inventory.Add(Stock(Twine, 1));
+        b.Inventory.Add(Stock(Twine, 2));
+        LowStockEntry[] entries = [new() { ItemId = Twine, Target = 2 }, Watch(Other)];
+        var first = AutoRestockPlanner.ForVisit(Plan(entries, [a, b]), a, a);
+        Assert.Equal(a.Key, Assert.Single(first.First().Actions).RetainerKey);
+        Assert.Contains(first, p => p.ItemId == Other);
+        a.Inventory.Clear();
+        a.Listings.Add(Listed(Twine, 1, 500));
+        var next = AutoRestockPlanner.ForVisit(Plan(entries, [a, b]), b, a);
+        var action = Assert.Single(Assert.Single(next).Actions);
+        Assert.Equal(b.Key, action.RetainerKey);
+        Assert.Equal(1, action.Quantity);
+        Assert.Equal(500, action.UnitPrice);
+    }
+
+    [Fact]
+    public void Handoff_requires_a_fresh_active_snapshot_and_a_complete_same_character_roster()
+    {
+        var a = Retainer("RetainerA");
+        var b = Retainer("RetainerB");
+        a.LastRefreshedUtc = b.LastRefreshedUtc = DateTime.UtcNow;
+        Assert.True(AutoRestockPlanner.CompleteVisitRoster(a, [a, b], 2));
+        Assert.False(AutoRestockPlanner.CompleteVisitRoster(null, [a, b], 2));
+        Assert.False(AutoRestockPlanner.CompleteVisitRoster(a, [a], 2));
+        b.CharacterContentId++;
+        Assert.False(AutoRestockPlanner.CompleteVisitRoster(a, [a, b], 2));
+        b.CharacterContentId--;
+        b.LastRefreshedUtc = DateTime.MinValue;
+        Assert.False(AutoRestockPlanner.CompleteVisitRoster(a, [a, b], 2));
+    }
+
     private const uint Other = 50971;
 
     [Fact]

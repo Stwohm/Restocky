@@ -59,6 +59,25 @@ public enum StockRestockMode { Default, Auto, Alert }
 /// </summary>
 public static class RestockPlanner
 {
+    internal static (List<PlannedAction> Actions, List<LowStockEntry> Skipped) PlanBatch(
+        IEnumerable<LowStockEntry> entries, IReadOnlyDictionary<string, int> freeSlots,
+        Func<LowStockEntry, IReadOnlyDictionary<string, int>, List<PlannedAction>> planRow)
+    {
+        var free = new Dictionary<string, int>(freeSlots);
+        var actions = new List<PlannedAction>();
+        var skipped = new List<LowStockEntry>();
+        // Each quality has its own source pool. Plan it once, including its top-up reservations.
+        foreach (var entry in entries.DistinctBy(e => (e.ItemId, e.IsHq)))
+        {
+            var row = planRow(entry, free);
+            if (row.Count == 0) skipped.Add(entry);
+            foreach (var action in row.Where(a => a.Kind == PlannedActionKind.NewListing))
+                free[action.RetainerKey]--;
+            actions.AddRange(row);
+        }
+        return (actions, skipped);
+    }
+
     public static List<PlannedAction> Plan(
         uint itemId,
         bool isHq,
