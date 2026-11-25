@@ -87,7 +87,7 @@ public class AutoRestockPlannerTests
     [Theory]
     [InlineData(StockRestockMode.Default, StockStatus.None, StockRestockMode.Auto)]
     [InlineData(StockRestockMode.Default, StockStatus.Regular, StockRestockMode.Auto)]
-    [InlineData(StockRestockMode.Default, StockStatus.Trial, StockRestockMode.Alert)]
+    [InlineData(StockRestockMode.Default, StockStatus.Trial, StockRestockMode.Auto)]
     [InlineData(StockRestockMode.Auto, StockStatus.Trial, StockRestockMode.Auto)]
     [InlineData(StockRestockMode.Alert, StockStatus.Regular, StockRestockMode.Alert)]
     public void Resolves_explicit_modes_and_tag_defaults(StockRestockMode mode, StockStatus status, StockRestockMode expected)
@@ -97,12 +97,12 @@ public class AutoRestockPlannerTests
     }
 
     [Fact]
-    public void Old_trial_entries_default_to_alert()
+    public void Old_trial_entries_default_to_auto()
     {
         var entry = System.Text.Json.JsonSerializer.Deserialize<LowStockEntry>("""{"ItemId":50970,"Status":2}""");
         Assert.NotNull(entry);
         Assert.Equal(StockRestockMode.Default, entry.RestockMode);
-        Assert.Equal(StockRestockMode.Alert, entry.EffectiveRestockMode);
+        Assert.Equal(StockRestockMode.Auto, entry.EffectiveRestockMode);
     }
 
     [Fact]
@@ -110,7 +110,7 @@ public class AutoRestockPlannerTests
     {
         var a = Retainer("A", Enumerable.Repeat(Listed(Other + 1, 1, 100), 19).ToArray());
         a.Inventory.AddRange([Stock(Twine, 1), Stock(Twine, 1, hq: true), Stock(Other, 1)]);
-        var trial = new LowStockEntry { ItemId = Twine, Status = StockStatus.Trial };
+        var trial = new LowStockEntry { ItemId = Twine, Status = StockStatus.Trial, RestockMode = StockRestockMode.Alert };
         var alert = new LowStockEntry { ItemId = Other, RestockMode = StockRestockMode.Alert };
         var auto = new LowStockEntry { ItemId = Twine, IsHq = true, Status = StockStatus.Trial, RestockMode = StockRestockMode.Auto };
 

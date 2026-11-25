@@ -25,12 +25,9 @@ public sealed class LowStockEntry
     public StockStatus Status { get; set; }
     public StockRestockMode RestockMode { get; set; }
 
-    internal StockRestockMode EffectiveRestockMode => RestockMode switch
-    {
-        StockRestockMode.Auto => StockRestockMode.Auto,
-        StockRestockMode.Alert => StockRestockMode.Alert,
-        _ => Status == StockStatus.Trial ? StockRestockMode.Alert : StockRestockMode.Auto,
-    };
+    // Tags do not change restocking: only an explicit Alert keeps an item out (user decision 2026-11-25).
+    internal StockRestockMode EffectiveRestockMode => RestockMode == StockRestockMode.Alert
+        ? StockRestockMode.Alert : StockRestockMode.Auto;
 
     internal bool MatchesTags(StockKind kind, StockStatus status)
         => (kind == StockKind.None || Kind == kind) && (status == StockStatus.None || Status == status);
