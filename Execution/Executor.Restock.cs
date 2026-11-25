@@ -18,6 +18,11 @@ public sealed unsafe partial class Executor
     private readonly Dictionary<(uint ItemId, bool IsHq), (RestockPrice Price, int Quantity)> autoRestockResults = new();
     private readonly List<(PlannedAction Action, RestockSkipReason Reason)> autoRestockFailures = new();
 
+    // Baits the live price ignored, reported once the listing is confirmed.
+    private readonly Dictionary<(uint ItemId, bool IsHq), BaitNotice> restockBaits = new();
+
+    private readonly HashSet<(uint ItemId, bool IsHq)> reportedRestockBaits = new();
+
     private bool TryPriceRestock(PlannedAction action)
     {
         var key = (action.ItemId, action.IsHQ);
@@ -132,6 +137,14 @@ public sealed unsafe partial class Executor
         }
         var price = ResolveRestockPrice(action, scan);
         restockPrices[(action.ItemId, action.IsHQ)] = price;
+        if (scan != null && price.Kind == AutoRestockPriceKind.LiveMarket && !configuration.IsHeld(action.ItemId, action.IsHQ))
+        {
+            var matchQuality = configuration.MatchQuality.For(action.ItemId, action.IsHQ);
+            var lowest = scan.Lowest(action.IsHQ, matchQuality);
+            var dropped = BaitFinder.Dropped(scan.Competitors(action.IsHQ, matchQuality), lowest);
+            if (dropped.Count > 0)
+                restockBaits[(action.ItemId, action.IsHQ)] = new BaitNotice(action.ItemId, action.IsHQ, CurrentJob.RetainerName, dropped, lowest);
+        }
 
         // Close the pricing windows and let the usual direct listing path verify the server slot.
         Plugin.Instance?.SetMarketWatcherExpected(0, false);
@@ -167,6 +180,7 @@ public sealed unsafe partial class Executor
 
     private void CompleteListing(RestockSkipReason reason = RestockSkipReason.None)
     {
+        var slot = pendingListingSlot;
         pendingListingSlot = -1;
         var action = currentJobActions.Dequeue();
         var key = (action.ItemId, action.IsHQ);
@@ -182,6 +196,13 @@ public sealed unsafe partial class Executor
         }
         else if (action.StockRestock)
         {
+            if (restockBaits.TryGetValue(key, out var bait))
+            {
+                // The new listing is priced above the bait: offer the match here, as the reprice plan does.
+                LastBaitPricesFor(action.RetainerKey)[(slot, action.ItemId, action.IsHQ)] = bait.Baits[0].Price;
+                reportedBaits.Add(BaitFinder.Key(bait));
+                if (reportedRestockBaits.Add(key)) ReportBait(bait);
+            }
             var price = action.ResolveRestockPrice ? restockPrices[key]
                 : action.RestockPrice ?? new RestockPrice(action.UnitPrice, AutoRestockPriceKind.Listing);
             RunHistory?.Add(new RunEntry(CurrentJob.RetainerName, RunEntryKind.Restocked,

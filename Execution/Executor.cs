@@ -349,6 +349,8 @@ public sealed unsafe partial class Executor : IDisposable
         autoRestockResults.Clear();
         autoRestockFailures.Clear();
         restockPrices.Clear();
+        restockBaits.Clear();
+        reportedRestockBaits.Clear();
         restockComparing = false;
         historyRequested.Clear();
         historyRetainerKey = null;
@@ -1012,12 +1014,7 @@ public sealed unsafe partial class Executor : IDisposable
         }
         foreach (var b in plan.Baits)
         {
-            if (!reportedBaits.Add(BaitFinder.Key(b))) continue;
-            var name = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Item>().TryGetRow(b.ItemId, out var row)
-                ? row.Name.ExtractText() : $"#{b.ItemId}";
-            var msg = BaitFinder.Format(name, b);
-            log.Information($"[Restocker] {msg}");
-            Plugin.Instance?.PrintBaitMatchLink(msg, name, b);
+            if (reportedBaits.Add(BaitFinder.Key(b))) ReportBait(b);
         }
         foreach (var a in plan.Actions) currentJobActions.Enqueue(a);
         var work = runEta!.WorkFor(job);
@@ -1026,6 +1023,15 @@ public sealed unsafe partial class Executor : IDisposable
         runEta.SetWork(job, work with { Reprices = reprices }, runClock.Elapsed, discovered: true);
         runEta.LearnRepriceShare(live.Count(l => !configuration.IsHeld(l.ItemId, l.IsHQ)), plan.Actions.Count);
         log.Information($"[Restocker] full cycle plan: {job.RetainerName} listings={live.Count} reprice={plan.Actions.Count} not-applied={plan.NotApplied.Count}");
+    }
+
+    private void ReportBait(BaitNotice bait)
+    {
+        var name = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Item>().TryGetRow(bait.ItemId, out var row)
+            ? row.Name.ExtractText() : $"#{bait.ItemId}";
+        var msg = BaitFinder.Format(name, bait);
+        log.Information($"[Restocker] {msg}");
+        Plugin.Instance?.PrintBaitMatchLink(msg, name, bait);
     }
 
     private string ActiveRetainerKey()
