@@ -253,7 +253,13 @@ public class RetainerHistoryTests
             tracker.ObserveRetainer("A", "RetainerA", [new(0, 100, true, 2, 100)], _ => "Item", SoldAt.AddHours(-1));
             var target = Assert.Single(tracker.ActiveFor(100, true));
             if (kind == "allagan")
-                tracker.OnAllaganSale([100], 2, 189, SoldAt.AddHours(2));
+            {
+                // Persist the duplicate sold record that older versions could create.
+                target.Outcome = ListingTracker.Sold;
+                target.SoldSource = ListingTracker.AllaganMarketSaleSource;
+                target.SoldTotalGil = 189;
+                target.SoldRecordedUtc = target.EndedUtc = SoldAt.AddHours(2);
+            }
             else
                 tracker.ObserveRetainer("A", "RetainerA", [], _ => "Item", SoldAt.AddHours(2), true);
             if (targetHasCost) (target.ConsumedCost, target.UnknownCostUnits) = (25m, 1);

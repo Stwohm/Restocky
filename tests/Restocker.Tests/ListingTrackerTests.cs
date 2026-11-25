@@ -11,6 +11,7 @@ public class ListingTrackerTests
 {
     private static readonly DateTime T0 = new(2026, 11, 20, 12, 0, 0, DateTimeKind.Utc);
     private const string RetainerA = "RetainerA";
+    private const string RetainerB = "RetainerB";
     private const string K = "k1";
     private static string Name(uint id) => id == 100 ? "Twine" : $"#{id}";
 
@@ -264,6 +265,199 @@ public class ListingTrackerTests
         Assert.Single(t.Records, r => r.Outcome == ListingTracker.Sold);
         Assert.Single(t.Records, r => r.Outcome == ListingTracker.Active);
         Assert.Equal(ListingTracker.AllaganMarketSaleSource, t.Records.Single(r => r.Outcome == ListingTracker.Sold).SoldSource);
+    }
+
+    [Theory]
+    [InlineData(914, 99, 1196, 1176, 110603, 110603)]
+    [InlineData(1599, 99, 1196, 1176, 110603, 110603)]
+    [InlineData(21600, 99, 1196, 1176, 110603, 110603)]
+    [InlineData(21600, 24, 997, 999, 22778, 22777)]
+    public void Delayed_allagan_notice_leaves_an_unrelated_gone_listing_alone(
+        int delaySeconds, int quantity, long oldPrice, long newPrice, long gameNet, long noticeNet)
+    {
+        var t = new ListingTracker();
+        var notice = T0.AddSeconds(delaySeconds);
+        var ended = notice.AddHours(-18);
+        t.ObserveRetainer(K, RetainerA, [new(0, 7, false, quantity, oldPrice)], Name, ended.AddMinutes(-1));
+        t.ObserveRetainer(K, RetainerA, [], Name, ended, authoritative: true);
+        var gone = Assert.Single(t.Records);
+        t.ObserveRetainer(K, RetainerA, [new(0, 7, false, quantity, newPrice)], Name, T0.AddMinutes(-1));
+        var sold = t.OnSale(7, false, gameNet, T0);
+        Assert.NotNull(sold);
+        t.Dirty = false;
+
+        Assert.Null(t.OnAllaganSale([7], quantity, noticeNet, notice));
+
+        Assert.Equal(ListingTracker.Gone, gone.Outcome);
+        Assert.Equal(0, gone.SoldTotalGil);
+        Assert.Null(gone.SoldRecordedUtc);
+        Assert.Same(sold, Assert.Single(t.GetSales()));
+        Assert.Equal(notice, sold.AllaganNoticeUtc);
+        Assert.True(t.Dirty);
+    }
+
+    [Fact]
+    public void Delayed_allagan_notice_leaves_a_relisted_stack_active()
+    {
+        var t = new ListingTracker();
+        t.ObserveRetainer(K, RetainerA, [new(0, 7, false, 99, 1176)], Name, T0.AddMinutes(-1));
+        var sold = t.OnSale(7, false, 110603, T0);
+        t.ObserveRetainer(K, RetainerA, [new(0, 7, false, 99, 1196)], Name, T0.AddMinutes(1));
+        var relisted = Assert.Single(t.ActiveListings);
+
+        Assert.Null(t.OnAllaganSale([7], 99, 110603, T0.AddHours(6)));
+
+        Assert.Equal(ListingTracker.Active, relisted.Outcome);
+        Assert.Same(sold, Assert.Single(t.GetSales()));
+    }
+
+    [Fact]
+    public void Delayed_allagan_notice_pairs_with_a_history_recorded_sale()
+    {
+        var t = new ListingTracker();
+        t.ObserveRetainer(K, RetainerA, [new(0, 7, false, 1, 10000)], Name, T0.AddMinutes(-1));
+        var sale = new RetainerHistorySale(7, 9500, (uint)new DateTimeOffset(T0).ToUnixTimeSeconds(), 1, false, false, string.Empty);
+        Assert.Equal(HistorySaleResult.MatchedListing, t.OnHistorySale(K, RetainerA, sale, Name));
+        var sold = Assert.Single(t.GetSales());
+        Assert.Equal("history", sold.SoldSource);
+        t.ObserveRetainer(K, RetainerA, [new(0, 7, false, 1, 10000)], Name, T0.AddMinutes(1));
+        var active = Assert.Single(t.ActiveListings);
+
+        Assert.Null(t.OnAllaganSale([7], 1, 9500, T0.AddHours(6)));
+
+        Assert.Equal(ListingTracker.Active, active.Outcome);
+        Assert.Same(sold, Assert.Single(t.GetSales()));
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(360)]
+    public void Paired_allagan_notice_allows_a_second_sale_eleven_minutes_later(int delayMinutes)
+    {
+        var t = new ListingTracker();
+        t.ObserveRetainer(K, RetainerA, [new(0, 7, false, 1, 10000), new(1, 7, false, 1, 10000)], Name, T0.AddMinutes(-1));
+        var sold = t.OnSale(7, false, 9500, T0);
+        Assert.NotNull(sold);
+        var unseen = Assert.Single(t.ActiveListings);
+        var notice = T0.AddMinutes(delayMinutes);
+        t.Dirty = false;
+
+        Assert.Null(t.OnAllaganSale([7], 1, 9500, notice));
+        Assert.True(t.Dirty);
+        Assert.Equal(notice, sold.AllaganNoticeUtc);
+        Assert.Same(unseen, t.OnAllaganSale([7], 1, 9500, notice.AddMinutes(11)));
+        Assert.Null(unseen.AllaganNoticeUtc);
+
+        Assert.Equal(2, t.GetSales().Count());
+    }
+
+    [Fact]
+    public void Simultaneous_allagan_notices_each_pair_with_a_known_game_sale()
+    {
+        var t = new ListingTracker();
+        t.ObserveRetainer(K, RetainerA,
+            [new(0, 7, false, 1, 10000), new(1, 7, false, 1, 10000),
+             new(2, 7, false, 1, 10000), new(3, 7, false, 1, 10000)], Name, T0.AddMinutes(-1));
+        Assert.NotNull(t.OnSale(7, false, 9500, T0));
+        Assert.NotNull(t.OnSale(7, false, 9500, T0));
+        Assert.NotNull(t.OnSale(7, false, 9500, T0));
+        var active = Assert.Single(t.ActiveListings);
+        var notice = T0.AddHours(6);
+
+        for (var i = 0; i < 3; i++)
+            Assert.Null(t.OnAllaganSale([7], 1, 9500, notice));
+
+        var sales = t.GetSales().ToList();
+        Assert.Equal(3, sales.Count);
+        Assert.All(sales, sale => Assert.Equal(notice, sale.AllaganNoticeUtc));
+        Assert.Equal(ListingTracker.Active, active.Outcome);
+        Assert.Same(active, t.OnAllaganSale([7], 1, 9500, notice.AddMinutes(11)));
+    }
+
+    [Fact]
+    public void Reconcile_history_preserves_a_paired_allagan_notice_on_the_merged_listing()
+    {
+        var t = new ListingTracker();
+        var sale = new RetainerHistorySale(7, 9500, (uint)new DateTimeOffset(T0).ToUnixTimeSeconds(), 1, false, false, string.Empty);
+        Assert.Equal(HistorySaleResult.HistoryOnly, t.OnHistorySale(K, RetainerA, sale, Name));
+        var history = Assert.Single(t.GetSales());
+        var notice = T0.AddHours(6);
+        Assert.Null(t.OnAllaganSale([7], 1, 9500, notice));
+        Assert.Equal(notice, history.AllaganNoticeUtc);
+
+        t.ObserveRetainer(K, RetainerA, [new(0, 7, false, 1, 10000)], Name, T0.AddMinutes(-1));
+        var target = Assert.Single(t.ActiveListings);
+        t.ObserveRetainer(K, RetainerA, [], Name, notice, authoritative: true);
+        Assert.Equal(ListingTracker.Gone, target.Outcome);
+        t.ReconcileHistory();
+
+        Assert.Same(target, Assert.Single(t.Records));
+        Assert.Equal(notice, target.AllaganNoticeUtc);
+        t.ObserveRetainer(K, RetainerA, [new(0, 7, false, 1, 10000)], Name, notice.AddMinutes(1));
+        var active = Assert.Single(t.ActiveListings);
+        Assert.Same(active, t.OnAllaganSale([7], 1, 9500, notice.AddMinutes(11)));
+    }
+
+    [Fact]
+    public void Repeated_delayed_allagan_notice_does_not_sell_a_listing_or_extend_the_window()
+    {
+        var t = new ListingTracker();
+        t.ObserveRetainer(K, RetainerA, [new(0, 7, false, 1, 10000)], Name, T0.AddMinutes(-1));
+        Assert.NotNull(t.OnSale(7, false, 9500, T0));
+        var notice = T0.AddHours(6);
+        Assert.Null(t.OnAllaganSale([7], 1, 9500, notice));
+        t.ObserveRetainer(K, RetainerA, [new(0, 7, false, 1, 10000)], Name, notice.AddSeconds(1));
+        var active = Assert.Single(t.ActiveListings);
+        t.Dirty = false;
+
+        Assert.Null(t.OnAllaganSale([7], 1, 9501, notice.AddSeconds(88)));
+        Assert.Equal(ListingTracker.Active, active.Outcome);
+        Assert.Single(t.GetSales());
+        Assert.False(t.Dirty);
+        Assert.Same(active, t.OnAllaganSale([7], 1, 9500, notice.AddMinutes(11)));
+    }
+
+    [Fact]
+    public void Allagan_notice_pairing_survives_save_and_load()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "restocky-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var t = new ListingTracker();
+            t.ObserveRetainer(K, RetainerA, [new(0, 7, false, 1, 10000)], Name, T0.AddMinutes(-1));
+            Assert.NotNull(t.OnSale(7, false, 9500, T0));
+            var notice = T0.AddHours(6);
+            Assert.Null(t.OnAllaganSale([7], 1, 9500, notice));
+            t.ObserveRetainer(K, RetainerA, [new(0, 7, false, 1, 10000)], Name, notice.AddMinutes(1));
+            Assert.True(t.Save(dir));
+
+            var back = ListingTracker.Load(Path.Combine(dir, "listings.json"));
+            Assert.Equal(notice, Assert.Single(back.GetSales()).AllaganNoticeUtc);
+            var unseen = Assert.Single(back.ActiveListings);
+            Assert.Same(unseen, back.OnAllaganSale([7], 1, 9500, notice.AddMinutes(11)));
+            Assert.Equal(2, back.GetSales().Count());
+        }
+        finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
+    }
+
+    [Theory]
+    [InlineData(73, 1, 9500, 1)]
+    [InlineData(6, 2, 9500, 1)]
+    [InlineData(6, 1, 9309, 1)]
+    [InlineData(6, 1, 9500, 2)]
+    public void Unrelated_known_sale_does_not_absorb_an_allagan_notice(
+        int delayHours, int knownQuantity, long knownNet, ulong knownCharacter)
+    {
+        var t = new ListingTracker();
+        var knownKey = $"{knownCharacter:X}.A";
+        t.ObserveRetainer(knownKey, RetainerA, [new(0, 7, false, knownQuantity, 10000)], Name, T0.AddMinutes(-1));
+        Assert.NotNull(t.OnSale(7, false, knownNet, T0, knownCharacter));
+        var notice = T0.AddHours(delayHours);
+        t.ObserveRetainer("1.B", RetainerB, [new(0, 7, false, 1, 10000)], Name, notice.AddMinutes(-1));
+        var unseen = Assert.Single(t.ActiveListings);
+
+        Assert.Same(unseen, t.OnAllaganSale([7], 1, 9500, notice, 1));
+        Assert.Equal(2, t.GetSales().Count());
     }
 
     // The game rounds the tax down, not the proceeds (133 of 140 recorded sales; none round the proceeds down).

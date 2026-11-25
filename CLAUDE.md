@@ -69,6 +69,8 @@ Fork changes and where they live:
 - **AllaganMarket sales** (`Market/AllaganSaleMessage.cs`, tested): parses its plain-text sale
   notice, resolves every exact-name item id, matches quantity/value across HQ/NQ, falls back from
   a recent `gone` listing to `sold`, and de-duplicates paired game/plugin notices.
+  Delayed notices pair once with game or history sales recorded in the prior 72 hours. The paired
+  notice timestamp persists in `listings.json` and suppresses repeats for 10 minutes.
 - **Per-item Hold** (`Configuration.HeldItems`, `Plan/AutoRepricePlanner.cs`, tested): item+HQ/NQ
   flags block Full/Auto repricing with a `held` history row; manual planning remains available.
 - **AutoRetainer** (`AutoRetainerIpc.cs`, `Execution/AutoRetainerGate.cs` tested): due cycle waits

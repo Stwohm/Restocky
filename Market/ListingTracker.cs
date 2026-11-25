@@ -71,6 +71,8 @@ public sealed class ListingRecord
     /// <summary>First source to report the sale: game, allaganmarket, or history.</summary>
     public string SoldSource { get; set; } = string.Empty;
 
+    public DateTime? AllaganNoticeUtc { get; set; }
+
     // Fork: authoritative sale history and the transaction identity survive reloads.
     public string? HistoryKey { get; set; }
     public string? BuyerName { get; set; }
@@ -318,6 +320,29 @@ public sealed class ListingTracker(SaleCostConsumer? consumeCost = null)
         if (candidateItemIds.Count == 0 || quantity <= 0 || netGil <= 0) return null;
         var ids = candidateItemIds as HashSet<uint> ?? candidateItemIds.ToHashSet();
         var records = SaleCandidates(characterId);
+        var knownSales = records.Where(r => r.Outcome == Sold && r.SoldTotalGil > 0
+            && ids.Contains(r.ItemId) && r.Quantity == quantity
+            && !string.IsNullOrEmpty(r.SoldSource) && r.SoldSource != AllaganMarketSaleSource
+            && Math.Abs((decimal)r.SoldTotalGil - netGil) <= Tolerance(netGil));
+
+        var known = knownSales.Where(r => r.AllaganNoticeUtc == null && r.SoldRecordedUtc is { } recorded
+                && nowUtc >= recorded && nowUtc - recorded <= GoneSaleWindow)
+            .OrderBy(r => Math.Abs((decimal)r.SoldTotalGil - netGil))
+            .ThenBy(r => r.SoldRecordedUtc)
+            .ThenBy(r => r.Id, StringComparer.Ordinal)
+            .FirstOrDefault();
+        if (known != null)
+        {
+            known.AllaganNoticeUtc = nowUtc;
+            Dirty = true;
+            return null;
+        }
+
+        // After pairing known sales, treat an extra identical notice within the window as a repeat.
+        // If it represents a real sale, retainer sale history recovers it.
+        if (knownSales.Any(r => r.AllaganNoticeUtc is { } notice && nowUtc >= notice
+            && nowUtc - notice <= DuplicateSaleWindow)) return null;
+
         if (IsDuplicateSale(records, ids, netGil, nowUtc, AllaganMarketSaleSource)) return null;
 
         var active = records.Where(r => r.Outcome == Active && ids.Contains(r.ItemId) && r.Quantity == quantity);
@@ -440,6 +465,7 @@ public sealed class ListingTracker(SaleCostConsumer? consumeCost = null)
                 target.UnknownCostUnits = row.UnknownCostUnits;
             }
             ApplyHistory(target, row.HistoryKey!, time, row.SoldTotalGil, row.BuyerName, row.IsMannequin);
+            target.AllaganNoticeUtc ??= row.AllaganNoticeUtc;
             Records.Remove(row);
             log?.Invoke($"[Restocky] history: reconcile merged {target.ItemName} into {kind} record");
         }
