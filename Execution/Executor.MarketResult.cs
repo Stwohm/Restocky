@@ -24,8 +24,8 @@ public sealed unsafe partial class Executor
         var watcher = Plugin.Instance.MarketWatcher;
         if (rows == 0 && MarketResultReadback.EmptyItemMatches(fetchItemId, titleItem, agent != null ? agent->ResultItemId : 0, title)
             && MarketResultReadback.IsEmpty(rows, proxyOffers, search != null && search->WaitingForListings,
-                HasMarketMessage(result, AddonText.NoMarketResults), HasMarketMessage(result, AddonText.MarketSearchWaiting),
-                watcher.HasHistoryAfter(fetchItemId, fetchClickedAtUtc), elapsed)
+                elapsed >= MarketResultReadback.MessageSettle && HasMarketMessage(result, AddonText.NoMarketResults), HasMarketMessage(result, AddonText.MarketSearchWaiting),
+                watcher.HasHistoryAfter(fetchItemId, searchRowStartUtc), elapsed)
             && watcher.RecordEmptySearch(fetchItemId))
         {
             LogMarketResult(result, "confirmed empty");

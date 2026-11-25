@@ -64,8 +64,8 @@ public sealed class RestockPricingTests
 
     [Theory]
     [InlineData(1234, 0, 1234)]
-    [InlineData(0, 2344, 1234)]
-    [InlineData(1000, 2344, 1234)]
+    [InlineData(0, 2345, 1234)]
+    [InlineData(1000, 2345, 1234)]
     public void Accepts_legacy_asking_price_and_net_only_sale_history(int lastPrice, int netGil, int expected)
     {
         var price = RestockPricing.Resolve(null, null, Now, 6, 1, 0,
@@ -77,7 +77,7 @@ public sealed class RestockPricingTests
     public void Skips_a_net_sale_that_cannot_represent_a_whole_gil_unit_price()
     {
         var price = RestockPricing.Resolve(null, null, Now, 6, 1, 0,
-            () => new ListingRecord { SoldTotalGil = 100, Quantity = 3 });
+            () => new ListingRecord { SoldTotalGil = 101, Quantity = 3 });
         Assert.Equal(new RestockPrice(0, AutoRestockPriceKind.NoMarketOrSale), price);
     }
 
@@ -113,4 +113,14 @@ public sealed class RestockPricingTests
     [InlineData(4294967296L, 0, false)]
     public void Validates_price_against_floor_and_api_range(long price, long floor, bool valid)
         => Assert.Equal(valid, RestockPricing.IsValidPrice(price, floor));
+
+    [Theory]
+    [InlineData(348)] // tracked listing
+    [InlineData(0)]   // history only
+    public void Last_sale_recovers_a_stack_price_whose_tax_is_not_a_whole_gil(long lastPrice)
+    {
+        var price = RestockPricing.Resolve(0, null, DateTime.UtcNow, 6, 1, 0,
+            () => new ListingRecord { LastPrice = lastPrice, SoldTotalGil = 32_730, Quantity = 99 });
+        Assert.Equal(new RestockPrice(348, AutoRestockPriceKind.LastSale), price);
+    }
 }

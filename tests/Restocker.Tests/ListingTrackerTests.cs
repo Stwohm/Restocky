@@ -266,9 +266,14 @@ public class ListingTrackerTests
         Assert.Equal(ListingTracker.AllaganMarketSaleSource, t.Records.Single(r => r.Outcome == ListingTracker.Sold).SoldSource);
     }
 
-    [Fact]
-    public void Gross_gil_is_converted_to_net_with_named_sale_rate()
-        => Assert.Equal(71_952, ListingTracker.NetFromGross(75_739));
+    // The game rounds the tax down, not the proceeds (133 of 140 recorded sales; none round the proceeds down).
+    [Theory]
+    [InlineData(75_739, 71_953)]
+    [InlineData(34_452, 32_730)]
+    [InlineData(33_066, 31_413)]
+    [InlineData(100, 95)]
+    public void Gross_gil_is_converted_to_net_with_tax_rounded_down(long gross, long net)
+        => Assert.Equal(net, ListingTracker.NetFromGross(gross));
 
     [Fact]
     public void Competitors_on_another_retainers_listing_and_hq_are_separate()

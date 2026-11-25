@@ -337,7 +337,8 @@ public sealed class ListingTracker(SaleCostConsumer? consumeCost = null)
         return rec;
     }
 
-    public static long NetFromGross(long grossGil) => grossGil <= 0 ? 0 : (long)(grossGil * SaleNetRate);
+    /// <summary>The game rounds the fee down, so the proceeds round up.</summary>
+    public static long NetFromGross(long grossGil) => grossGil <= 0 ? 0 : (long)decimal.Ceiling(grossGil * SaleNetRate);
 
     // Fork: include chat-only sales, whose receipt time is the best available timestamp.
     public IEnumerable<ListingRecord> GetSales() => Records.Where(r => r.Outcome == Sold);

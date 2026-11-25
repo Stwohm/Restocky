@@ -34,7 +34,9 @@ public class MarketComparisonTests
     [Theory]
     [InlineData(0, 4000, true, (int)MarketAttemptDecision.Retry)]
     [InlineData(1, 1200, true, (int)MarketAttemptDecision.Retry)]
-    [InlineData(2, 200, true, (int)MarketAttemptDecision.NoData)]
+    [InlineData(0, 999, true, (int)MarketAttemptDecision.Wait)]
+    [InlineData(2, 999, true, (int)MarketAttemptDecision.Wait)]
+    [InlineData(2, 1000, true, (int)MarketAttemptDecision.NoData)]
     [InlineData(2, 3999, false, (int)MarketAttemptDecision.Wait)]
     [InlineData(0, 4000, false, (int)MarketAttemptDecision.NoData)]
     public void Error_retries_and_timeout_are_per_attempt(int retries, int elapsed, bool error, int expected)

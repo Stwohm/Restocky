@@ -62,7 +62,7 @@ internal static class RestockPricing
         if (sale.SoldTotalGil <= 0) return 0;
 
         // History-only records have net proceeds. Recover a consistent whole-gil unit price.
-        var unitPrice = decimal.Ceiling(sale.SoldTotalGil / (ListingTracker.SaleNetRate * sale.Quantity));
+        var unitPrice = decimal.Floor(sale.SoldTotalGil / (ListingTracker.SaleNetRate * sale.Quantity));
         if (unitPrice > uint.MaxValue) return (long)uint.MaxValue + 1;
         var price = (long)unitPrice;
         return ListingTracker.NetFromGross(price * sale.Quantity) == sale.SoldTotalGil ? price : 0;

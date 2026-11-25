@@ -71,6 +71,7 @@ public sealed unsafe partial class Executor
                 // The sale entry is available with owner addon ID 0, as in List & price.
                 Plugin.Instance?.SetMarketWatcherExpected(0, false);
                 restockComparing = true;
+                BeginSearchRow();
                 agent->OpenForItemSlot(type, i, 0, 0);
                 log.Information($"[Restocker] restock comparison: context menu for item={action.ItemId} at {type}#{i}");
                 State = ExecutionState.HandoverAwaitContext;

@@ -115,7 +115,9 @@ public sealed unsafe partial class Executor : IDisposable
     private DateTime fetchClickedAtUtc;
     private DateTime comparisonWaitStart;
     private int comparisonRetries;
+    // Checked before the row's dialog opens: Marketbuddy can open the search together with the dialog.
     private bool searchResultWasClosed;
+    private DateTime searchRowStartUtc;
     private readonly HashSet<uint> timedOutMarketItems = new();
     internal bool MarketFetchTimedOut(uint itemId) => timedOutMarketItems.Contains(itemId);
 
@@ -1431,8 +1433,15 @@ public sealed unsafe partial class Executor : IDisposable
     {
         State = ExecutionState.AwaitingContextMenu;
         waitingSince = null;
+        BeginSearchRow();
         ClickListingSlot(slot);
         Throttle();
+    }
+
+    private void BeginSearchRow()
+    {
+        searchResultWasClosed = !AddonHelper.IsOpen("ItemSearchResult");
+        searchRowStartUtc = DateTime.UtcNow;
     }
 
     private void HandleMissingAdjustPriceEntry(int slot, string entries)
@@ -1827,7 +1836,6 @@ public sealed unsafe partial class Executor : IDisposable
             // Another plugin (Marketbuddy: auto-open Compare prices) started this row's search.
             // The previous row's window was closed before this dialog opened, so use it instead of clicking.
             log.Information($"[Restocker] using the search already open for item={fetchItemId} hq={fetchIsHq}");
-            searchResultWasClosed = true;
             State = ExecutionState.FetchAwaitingMarketData;
             waitingSince = DateTime.UtcNow;
             return;
@@ -1848,7 +1856,6 @@ public sealed unsafe partial class Executor : IDisposable
         var lastPage = Plugin.Instance.MarketWatcher.LastOfferingsUtc;
         if (MarketResultReadback.WaitBeforeClick(now - lastPage, now - comparisonWaitStart, comparisonRetries > 0)) return;
         Plugin.Instance.SetMarketWatcherExpected(fetchItemId, fetchIsHq);
-        searchResultWasClosed = !AddonHelper.IsOpen("ItemSearchResult");
         fetchClickedAtUtc = now;
 
         Callback.Fire(addon, true, 4);
@@ -1868,7 +1875,7 @@ public sealed unsafe partial class Executor : IDisposable
         var sr = AddonHelper.GetVisible("ItemSearchResult");
         if (sr == null) searchResultWasClosed = true;
         var result = (AddonItemSearchResult*)sr;
-        var error = searchResultWasClosed && result != null && result->IsReady
+        var error = !ready && searchResultWasClosed && result != null && result->IsReady
             && (HasMarketMessage(result, AddonText.MarketSearchRetry) || HasMarketMessage(result, AddonText.MarketSearchRetryAlt));
         var attempt = MarketResultReadback.Attempt(comparisonRetries, elapsed, error);
         if (attempt == MarketAttemptDecision.Retry)
@@ -1881,7 +1888,7 @@ public sealed unsafe partial class Executor : IDisposable
             State = ExecutionState.FetchAwaitingComparison;
             return;
         }
-        if (error)
+        if (error && attempt == MarketAttemptDecision.NoData)
         {
             FinishMarketAttempt(null);
             return;

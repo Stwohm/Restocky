@@ -8,9 +8,12 @@ internal enum MarketAttemptDecision { Wait, Retry, NoData }
 
 internal static class MarketResultReadback
 {
+    internal static readonly TimeSpan MessageSettle = TimeSpan.FromSeconds(1);
+
     internal static MarketAttemptDecision Attempt(int retries, TimeSpan elapsed, bool error)
     {
-        if (error) return retries < 2 ? MarketAttemptDecision.Retry : MarketAttemptDecision.NoData;
+        // Offers arrive within a second. A message before that can still be replaced by results.
+        if (error && elapsed >= MessageSettle) return retries < 2 ? MarketAttemptDecision.Retry : MarketAttemptDecision.NoData;
         return elapsed >= TimeSpan.FromSeconds(4) ? MarketAttemptDecision.NoData : MarketAttemptDecision.Wait;
     }
 
