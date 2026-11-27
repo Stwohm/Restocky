@@ -6,7 +6,7 @@ using Restocker.Market;
 
 namespace Restocker.Plan;
 
-internal enum RestockSkipReason { None, NoStock, NoSlot, PreferredRetainerFull, SourceRetainerFull, Unavailable, SourceUnavailable, WriteFailed, TimedOut, PriceUnavailable, Unconfirmed }
+internal enum RestockSkipReason { None, NoStock, NoSlot, PreferredRetainerFull, SourceRetainerFull, Unavailable, SourceUnavailable, WriteFailed, TimedOut, PriceUnavailable, Unconfirmed, CrystalWithdrawalPending, CrystalWithdrawalFailed }
 
 internal sealed record AutoRestockPlan(uint ItemId, bool IsHq, AutoRestockPriceKind PriceKind, List<PlannedAction> Actions,
     RestockSkipReason SkipReason = RestockSkipReason.None, string? RetainerName = null);
@@ -28,7 +28,7 @@ internal static class AutoRestockPlanner
         {
             var itemId = entry.ItemId;
             var hq = entry.IsHq;
-            if (entry.EffectiveRestockMode != StockRestockMode.Auto || isHeld(itemId, hq)) continue;
+            if (!entry.AllowsAutoRestock || isHeld(itemId, hq)) continue;
 
             var existing = listings[(itemId, hq)];
             var listedUnits = existing.Sum(l => l.Quantity);
@@ -90,6 +90,8 @@ internal static class AutoRestockPlanner
                 continue;
             }
             var actions = plan.Actions.FindAll(a => a.RetainerKey == active.Key);
+            if (actions.RemoveAll(a => a.NeedsCrystalWithdrawal) > 0)
+                result.Add(plan with { Actions = [], SkipReason = RestockSkipReason.CrystalWithdrawalPending, RetainerName = active.RetainerName });
             if (actions.Count > 0) result.Add(plan with { Actions = actions });
         }
         return result;

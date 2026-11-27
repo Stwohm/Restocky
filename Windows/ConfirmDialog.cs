@@ -93,6 +93,8 @@ public sealed class ConfirmDialog
             {
                 var name = sheet.TryGetRow(a.ItemId, out var row) ? row.Name.ExtractText() : $"#{a.ItemId}";
                 if (a.IsHQ) name += " (HQ)";
+                if (a.NeedsCrystalWithdrawal && Plugin.Configuration.Snapshots.TryGetValue(a.SourceKey, out var source))
+                    ImGui.TextWrapped(Strings.CrystalTransferPlan(source.RetainerName, a.Quantity, retainerName));
                 if (a.Kind == PlannedActionKind.Reprice)
                 {
                     ImGui.BulletText($"{name} #{a.ListingIndex} → {a.UnitPrice:N0} g");

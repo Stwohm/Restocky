@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using Dalamud.Bindings.ImGui;
 using Lumina.Excel.Sheets;
+using Restocker.Common;
 using Restocker.Data;
 using Restocker.Execution;
 using Restocker.Localization;
@@ -391,6 +392,7 @@ public sealed class RepriceTab
                 }, prefill: true);
             if (!visible) continue;
 
+            executor.PrefillSummary.Remove(editKey);
             var guardKey = (snap.Key, listing.ListingIndex, listing.ItemId, listing.IsHQ);
             executor.GuardedPrices.Remove(guardKey);
             var baitKey = (listing.ListingIndex, listing.ItemId, listing.IsHQ);
@@ -407,7 +409,7 @@ public sealed class RepriceTab
                 if (timedOut)
                 {
                     editedPrice[EditKey(snap.Key, listing)] = (listing.UnitPrice, false);
-                    Plugin.ChatPrint($"{name} [{snap.RetainerName} #{listing.ListingIndex}] {string.Format(Strings.KeptPrice, listing.UnitPrice, Strings.NoMarketData)}");
+                    executor.PrefillSummary[editKey] = new(ChatCategory.Skipped, string.Format(Strings.KeptPrice, listing.UnitPrice, Strings.NoMarketData), listing.ItemId, listing.IsHQ, snap.RetainerName);
                 }
                 // Fork: a new full-cycle prefill must not leave a stale proposal available to Add all.
                 else if (respectHold) editedPrice.Remove(EditKey(snap.Key, listing));
@@ -423,14 +425,13 @@ public sealed class RepriceTab
                 var notice = new BaitNotice(listing.ItemId, listing.IsHQ, snap.RetainerName, dropped, lowest);
                 if (reportedBaits.Add(BaitFinder.Key(notice)))
                 {
-                    var itemName = sheet.TryGetRow(listing.ItemId, out var br) ? br.Name.ExtractText() : $"#{listing.ItemId}";
-                    Plugin.Instance.PrintBaitMatchLink(BaitFinder.Format(itemName, notice), itemName, notice);
+                    executor.ChatEvents.Add(ChatSummary.Bait(notice));
                 }
             }
             if (lowest <= 0)
             {
                 var reason = matchQuality ? Strings.NoCompetitor(listing.IsHQ) : Strings.NoMarketCompetitor;
-                Plugin.ChatPrint($"{name} [{snap.RetainerName} #{listing.ListingIndex}] {string.Format(Strings.KeptPrice, current, reason)}");
+                executor.PrefillSummary[editKey] = new(ChatCategory.Skipped, string.Format(Strings.KeptPrice, current, reason), listing.ItemId, listing.IsHQ, snap.RetainerName);
                 prefilledPrices[editKey] = decision.NewPrice;
                 editedPrice[editKey] = (decision.NewPrice, false);
                 Plugin.Log.Information($"  slot={listing.ListingIndex} item={listing.ItemId} hq={listing.IsHQ} name='{name}' {competitor} (skipped, no data)");
@@ -441,13 +442,10 @@ public sealed class RepriceTab
             editedPrice[editKey] = (newPrice, floor.FromCost && decision.Reason == RepriceReason.Floor);
             if (decision.MarkForReview)
             {
-                if (configuration.IsHeld(listing.ItemId, listing.IsHQ))
-                    Plugin.ChatPrint($"{name} [{snap.RetainerName} #{listing.ListingIndex}] {Strings.PriceWarning(decision.Reason, current, newPrice)}");
-                else
-                {
+                executor.PrefillSummary[editKey] = executor.GuardEvent(listing.ItemId, listing.IsHQ, snap.RetainerName,
+                    current, newPrice, decision.Reason, decision.ClampedFloor);
+                if (!configuration.IsHeld(listing.ItemId, listing.IsHQ))
                     executor.GuardedPrices[guardKey] = newPrice;
-                    Plugin.Instance.PrintPriceMatchLink(listing.ItemId, listing.IsHQ, snap.RetainerName, current, newPrice, decision.Reason);
-                }
             }
             applied++;
             Plugin.Log.Information($"  slot={listing.ListingIndex} item={listing.ItemId} hq={listing.IsHQ} name='{name}' current={current:N0} {competitor} -> new={newPrice:N0}");
@@ -669,6 +667,14 @@ public sealed class RepriceTab
         if (!ImGui.IsItemHovered()) return;
 
         ImGui.BeginTooltip();
+        var note = configuration.LowStock.Find(e => e.ItemId == listing.ItemId && e.IsHq == listing.IsHQ)?.Note;
+        if (!string.IsNullOrWhiteSpace(note))
+        {
+            ImGui.PushTextWrapPos(ImGui.GetFontSize() * 28);
+            ImGui.TextUnformatted(note);
+            ImGui.PopTextWrapPos();
+            ImGui.Separator();
+        }
         if (stuck && record != null)
         {
             var offers = marketCache.GetOffers(listing.ItemId, listing.IsHQ, configuration.MatchQuality.For(listing.ItemId, listing.IsHQ));

@@ -15,9 +15,6 @@ public sealed unsafe partial class Executor
 {
     private bool restockComparing;
     private readonly Dictionary<(uint ItemId, bool IsHq), RestockPrice> restockPrices = new();
-    private readonly Dictionary<(uint ItemId, bool IsHq), (RestockPrice Price, int Quantity)> autoRestockResults = new();
-    private readonly List<(PlannedAction Action, RestockSkipReason Reason)> autoRestockFailures = new();
-
     // Baits the live price ignored, reported once the listing is confirmed.
     private readonly Dictionary<(uint ItemId, bool IsHq), BaitNotice> restockBaits = new();
 
@@ -47,6 +44,8 @@ public sealed unsafe partial class Executor
     private InventoryType[] ListingSourceContainers(PlannedAction action)
     {
         var key = string.IsNullOrEmpty(action.SourceKey) ? action.RetainerKey : action.SourceKey;
+        if (InventoryEntry.IsCrystal(action.ItemId))
+            return action.ListsCharacterCrystals || key.StartsWith("char.") ? RetainerWatcher.PlayerCrystals : RetainerWatcher.RetainerCrystals;
         return autoRestockPass || (action.StockRestock && jobs.Exists(j => j.HasTopUpFor(action))) ? SourceContainersFor(key) : ResolveSearchOrder(key);
     }
 
@@ -187,14 +186,12 @@ public sealed unsafe partial class Executor
         if (reason != RestockSkipReason.None)
         {
             log.Warning($"[Restocker] listing skipped for {action.RetainerKey} item={action.ItemId} hq={action.IsHQ} qty={action.Quantity}: {reason}");
-            if (autoRestockPass) autoRestockFailures.Add((action, reason));
-            else if (action.StockRestock) PrintRestockFailure(action, reason);
-            if (action.StockRestock)
-                RunHistory?.Add(new RunEntry(CurrentJob.RetainerName, RunEntryKind.RestockSkipped,
-                    string.Format(Strings.RestockListingFailed, CurrentJob.RetainerName,
+            PrintRestockFailure(action, reason);
+            RunHistory?.Add(new RunEntry(CurrentJob.RetainerName, RunEntryKind.RestockSkipped,
+                string.Format(Strings.RestockListingFailed, CurrentJob.RetainerName,
                         AutoRestockItemName(action.ItemId, action.IsHQ), action.Quantity, RestockFailureDetails(action, reason))));
         }
-        else if (action.StockRestock)
+        else
         {
             if (restockBaits.TryGetValue(key, out var bait))
             {
@@ -207,10 +204,9 @@ public sealed unsafe partial class Executor
                 : action.RestockPrice ?? new RestockPrice(action.UnitPrice, AutoRestockPriceKind.Listing);
             RunHistory?.Add(new RunEntry(CurrentJob.RetainerName, RunEntryKind.Restocked,
                 RestockedMessage(action.ItemId, action.IsHQ, action.Quantity, price)));
-            if (autoRestockPass)
-                autoRestockResults[key] = (price, autoRestockResults.GetValueOrDefault(key).Quantity + action.Quantity);
-            else if (action.ResolveRestockPrice)
-                PrintRestocked(action.ItemId, action.IsHQ, action.Quantity, price);
+            ChatEvents.Add(new(ChatCategory.Restocked,
+                $"×{action.Quantity:N0} @ {price.UnitPrice:N0} · {Strings.AutoRestockPriceLabel(price.Kind, price.CacheAge)}",
+                action.ItemId, action.IsHQ, CurrentJob.RetainerName));
         }
 
         CompletedActions++;
@@ -226,29 +222,22 @@ public sealed unsafe partial class Executor
     private void PrintRestockFailure(PlannedAction action, RestockSkipReason reason)
     {
         var retainer = configuration.Snapshots.GetValueOrDefault(action.RetainerKey)?.RetainerName ?? action.RetainerKey;
-        Plugin.ChatPrint(string.Format(Strings.RestockListingFailed, retainer, AutoRestockItemName(action.ItemId, action.IsHQ),
-            action.Quantity, RestockFailureDetails(action, reason)));
+        ChatEvents.Add(new(ChatCategory.Problems, $"×{action.Quantity} · {RestockFailureDetails(action, reason)}",
+            action.ItemId, action.IsHQ, retainer));
     }
 
     private string RestockFailureDetails(PlannedAction action, RestockSkipReason reason)
-        => reason == RestockSkipReason.PriceUnavailable
+    {
+        if (reason == RestockSkipReason.CrystalWithdrawalFailed && withdrawalFailures.TryGetValue(action, out var failure))
+            return failure;
+        var detail = reason == RestockSkipReason.PriceUnavailable
             ? Strings.AutoRestockPriceLabel(restockPrices[(action.ItemId, action.IsHQ)].Kind)
             : Strings.RestockSkipLabel(reason);
-
-    private static void PrintRestocked(uint itemId, bool isHq, int quantity, RestockPrice price)
-        => Plugin.ChatPrint(RestockedMessage(itemId, isHq, quantity, price));
+        if (!confirmedWithdrawals.Contains(action)) return detail;
+        return $"{detail} · {CrystalSourceName(action.SourceKey)} → {Strings.StockBag} ×{action.Quantity:N0}";
+    }
 
     private static string RestockedMessage(uint itemId, bool isHq, int quantity, RestockPrice price)
         => string.Format(Strings.AutoRestocked, AutoRestockItemName(itemId, isHq), quantity,
             price.UnitPrice, Strings.AutoRestockPriceLabel(price.Kind, price.CacheAge));
-
-    private void PrintAutoRestockResults()
-    {
-        foreach (var (key, result) in autoRestockResults)
-            PrintRestocked(key.ItemId, key.IsHq, result.Quantity, result.Price);
-        foreach (var (action, reason) in autoRestockFailures)
-            PrintRestockFailure(action, reason);
-        autoRestockResults.Clear();
-        autoRestockFailures.Clear();
-    }
 }

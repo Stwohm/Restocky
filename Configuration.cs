@@ -58,7 +58,6 @@ public sealed class Configuration : IPluginConfiguration
 
     public int MarketSalesPeriodDays { get; set; } = 1;
     public bool AutoCostFloor { get; set; } = true;
-    public bool CostFloorOverrideMigrated { get; set; }
 
     private double saleTaxPercent = 5;
     public double SaleTaxPercent
@@ -131,9 +130,9 @@ public sealed class Configuration : IPluginConfiguration
         var complete = Snapshots.Count > 0 && Characters.Count > 0
             && (liveRetainer == null || Snapshots.ContainsKey(liveRetainer))
             && Snapshots.Values.All(s => Characters.ContainsKey(CharacterSnapshot.MakeKey(s.CharacterContentId))
-                && RetainerWatcher.RetainerInventoryFreshness(s) != DateTime.MinValue)
-            && Characters.Values.All(c => RetainerWatcher.CharacterInventoryFreshness(c, false) != DateTime.MinValue
-                && RetainerWatcher.CharacterInventoryFreshness(c, true) != DateTime.MinValue);
+                && RetainerWatcher.RetainerInventoryFreshness(s, itemId) != DateTime.MinValue)
+            && Characters.Values.All(c => RetainerWatcher.CharacterInventoryFreshness(c, false, itemId) != DateTime.MinValue
+                && (InventoryEntry.IsCrystal(itemId) || RetainerWatcher.CharacterInventoryFreshness(c, true) != DateTime.MinValue));
 
         var held = listed + available;
         var item = (itemId, hq);

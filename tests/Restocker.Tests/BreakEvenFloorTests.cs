@@ -50,22 +50,6 @@ public class BreakEvenFloorTests
         Assert.Equal((106L, true), BreakEvenFloor.Resolve(-1, 100m, 5, 0));
     }
 
-    [Theory]
-    [InlineData(125, null, null, false)]
-    [InlineData(0, null, null, false)]
-    [InlineData(0, 0, null, true)]
-    [InlineData(126, 100, null, true)]
-    [InlineData(126, null, 100, true)]
-    [InlineData(126, 100, 95, true)]
-    [InlineData(126, 95, 100, true)]
-    [InlineData(127, 95, 100, false)]
-    [InlineData(128, 100, 95, false)]
-    public void Migration_removes_only_floors_below_the_highest_known_break_even(
-        long manualFloor, int? nqUnitCost, int? hqUnitCost, bool expected)
-    {
-        Assert.Equal(expected, BreakEvenFloor.ShouldRemoveManualFloor(manualFloor, nqUnitCost, hqUnitCost, 5, 20));
-    }
-
     [Fact]
     public void Saturates_a_floor_above_the_long_range()
     {

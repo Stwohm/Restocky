@@ -156,7 +156,9 @@ public sealed unsafe partial class Executor : IDisposable
     public int ListingsHeld { get; private set; }
     // Fork: retain guarded proposals until the end-of-cycle chat summary.
     private readonly Dictionary<LiveListing, PriceHistoryRow> visitSkippedPrices = new();
-    private readonly List<PriceHistoryRow> skippedSummaryRows = new();
+    private readonly Dictionary<PriceHistoryRow, ChatEvent> skippedSummaryRows = new();
+    internal readonly Dictionary<string, ChatEvent> PrefillSummary = new();
+    internal readonly List<ChatEvent> ChatEvents = [];
 
     /// <summary>Fork: every price actually written in this run, for the chat summary.</summary>
     public List<(string Retainer, uint ItemId, bool IsHq, long OldPrice, long NewPrice)> AppliedReprices { get; } = new();
@@ -310,9 +312,10 @@ public sealed unsafe partial class Executor : IDisposable
     public void StartApplyActions(IEnumerable<PlannedAction> actions)
     {
         if (IsRunning) { log.Warning("[Restocker] Executor.Start while already running"); return; }
+        var problems = new List<ChatEvent>();
         var groups = RetainerVisitJob.GroupApplyActions(actions);
-        if (groups.SelectMany(g => g).Any(a => a.StockRestock || a.TopUp != null))
-            RunHistory?.Start(RunMode.Restock, DateTime.UtcNow);
+        var restocking = groups.SelectMany(g => g).Any(a => a.StockRestock || a.TopUp != null);
+        RunHistory?.Start(restocking ? RunMode.Restock : RunMode.Apply, DateTime.UtcNow);
         // RetainerKey ごとにグループ化、各リテイナー名を解決
         jobs.Clear();
         foreach (var group in groups)
@@ -321,17 +324,16 @@ public sealed unsafe partial class Executor : IDisposable
             if (!configuration.Snapshots.TryGetValue(key, out var snap))
             {
                 log.Warning($"[Restocker] unknown retainer key in plan: {key}");
+                problems.Add(new(ChatCategory.Problems, Strings.RunUnknownRetainer, Retainer: key));
                 RunHistory?.Add(new RunEntry(key, RunEntryKind.Error, Strings.RunUnknownRetainer));
                 continue;
             }
-            jobs.Add(new RetainerVisitJob
-            {
-                RetainerName = snap.RetainerName,
-                Actions = group,
-            });
+            jobs.AddRange(RetainerVisitJob.ListingVisits(group, snap.RetainerName, CrystalSourceName));
         }
-        PrintPreferredRetainerFallbacks(jobs.SelectMany(job => job.Actions));
         Begin(ExecutionMode.ApplyActions);
+        ChatEvents.AddRange(problems);
+        if (jobs.Count == 0) FlushSummary();
+        PrintPreferredRetainerFallbacks(jobs.SelectMany(job => job.Actions));
     }
 
     private void Begin(ExecutionMode mode, string? postprocessKey = null)
@@ -347,14 +349,14 @@ public sealed unsafe partial class Executor : IDisposable
         }
         collectAutoRestock = mode == ExecutionMode.FullCycle
             && configuration.AutoRestockDuringCycle
-            && configuration.LowStock.Any(e => e.EffectiveRestockMode == StockRestockMode.Auto);
+            && configuration.LowStock.Any(e => e.AllowsAutoRestock);
         autoRestockPass = false;
+        confirmedWithdrawals.Clear();
+        withdrawalFailures.Clear();
         pendingTopUp = null;
         unconfirmedTopUpItems.Clear();
         pendingReprice = null;
         autoRestockSnapshots.Clear();
-        autoRestockResults.Clear();
-        autoRestockFailures.Clear();
         restockPrices.Clear();
         restockBaits.Clear();
         reportedRestockBaits.Clear();
@@ -380,6 +382,8 @@ public sealed unsafe partial class Executor : IDisposable
         AppliedReprices.Clear();
         RepricesSkipped = 0;
         skippedSummaryRows.Clear();
+        PrefillSummary.Clear();
+        ChatEvents.Clear();
         ListingsHeld = 0;
         if (jobs.Count == 0)
         {
@@ -402,6 +406,14 @@ public sealed unsafe partial class Executor : IDisposable
             var rm = RetainerManager.Instance();
             var active = rm != null ? rm->GetActiveRetainer() : null;
             var activeName = active != null ? active->NameString : null;
+            if (jobs.Any(j => j.Withdrawal != null) && activeName != null)
+            {
+                jobs.Insert(0, new() { RetainerName = activeName, Actions = [] });
+                partialFirstVisit = true;
+                InitializeEta();
+                State = ExecutionState.ClosingSellList;
+                return;
+            }
             if (jobs[0].RetainerName == activeName
                 || (!HasTopUps && RetainerVisitJob.StartAtActive(jobs, activeName)))
             {
@@ -515,6 +527,7 @@ public sealed unsafe partial class Executor : IDisposable
                 case ExecutionState.PreStagingSaddle: TickPreStagingSaddle(); break;
                 case ExecutionState.AwaitingNewListing: TickAwaitingNewListing(); break;
                 case ExecutionState.AwaitingTopUp: TickTopUp(); break;
+                case ExecutionState.WithdrawingCrystals: TickCrystalWithdrawal(); break;
                 case ExecutionState.FetchAwaitingSellDialog: TickFetchAwaitingSellDialog(); break;
                 case ExecutionState.FetchAwaitingMarketData: TickFetchAwaitingMarketData(); break;
                 case ExecutionState.FetchAwaitingComparison: TickAwaitingComparison(); break;
@@ -531,6 +544,11 @@ public sealed unsafe partial class Executor : IDisposable
         catch (Exception ex)
         {
             log.Error(ex, "[Restocker] Executor tick exception");
+            if (State == ExecutionState.WithdrawingCrystals)
+            {
+                FinishCrystalWithdrawal("exception while withdrawing crystals");
+                return;
+            }
             if (pendingTopUp != null)
             {
                 FailTopUp("exception during top-up");
@@ -551,6 +569,14 @@ public sealed unsafe partial class Executor : IDisposable
     private void Stop(string reason)
     {
         var awaitingListing = State == ExecutionState.AwaitingNewListing && pendingListingSlot >= 0;
+        if (State == ExecutionState.WithdrawingCrystals)
+        {
+            FinishCrystalWithdrawal(reason);
+            var transfer = CurrentJob.Withdrawal!;
+            var detail = withdrawalFailures[transfer];
+            ChatEvents.Add(new(ChatCategory.Problems, detail, transfer.ItemId, transfer.IsHQ, CurrentJob.RetainerName));
+            RunHistory?.Add(new RunEntry(CurrentJob.RetainerName, RunEntryKind.RestockSkipped, detail));
+        }
         if (pendingTopUp != null) FailTopUp(reason);
         Plugin.Instance?.MarketWatcher.EndVisit();
         State = ExecutionState.Stopped;
@@ -568,7 +594,9 @@ public sealed unsafe partial class Executor : IDisposable
             TickPendingReprice(action);
         }
         CaptureListingsAfterActions();
-        PrintAutoRestockResults();
+        if (RunHistory?.IsRecording != true) Plugin.Instance?.Activity.Add("Stopped", cancellationReason ?? reason);
+        ChatEvents.Add(new(ChatCategory.Problems, cancellationReason ?? reason));
+        FlushSummary();
         RunHistory?.Finish(DateTime.UtcNow, cancellationReason ?? reason, stopped: true);
         log.Warning($"[Restocker] Executor stopped: {reason}");
     }
@@ -603,7 +631,12 @@ public sealed unsafe partial class Executor : IDisposable
         if (!AddonHelper.IsOpen("SelectString")) { AwaitRetainerMenu("SelectString"); return; }
         if (waitingSince == null) waitingSince = DateTime.UtcNow;
 
-        var idx = SelectStringHelper.FindEntryIndex(AddonText.IsHaveRetainerSellItemsEntry);
+        if (CurrentJob.Withdrawal != null)
+        {
+            StartCrystalWithdrawal();
+            return;
+        }
+        var idx = SelectStringHelper.FindEntryIndex(IsJobSellEntry);
         if (idx >= 0)
         {
             var entries = SelectStringHelper.EnumerateEntries();
@@ -625,7 +658,7 @@ public sealed unsafe partial class Executor : IDisposable
 
     private void TickOpeningSellList()
     {
-        if (!SelectStringHelper.ClickEntry(AddonText.IsHaveRetainerSellItemsEntry)) { AwaitRetainerMenu("sell-items entry"); return; }
+        if (!SelectStringHelper.ClickEntry(IsJobSellEntry)) { AwaitRetainerMenu("sell-items entry"); return; }
         waitingSince = null;
         if (autoRetainerKey != null) postprocessOpenedSellList = true;
         State = ExecutionState.AwaitingSellList;
@@ -864,31 +897,21 @@ public sealed unsafe partial class Executor : IDisposable
 
     private bool jobObserved;
 
-    /// <summary>"Ascendant Twine [RetainerA]: 84,999 → 84,998 ↓" for every price written this run.</summary>
-    public void PrintRepriceLines()
+    private void FlushSummary()
     {
-        var sheet = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Item>();
-        foreach (var r in AppliedReprices)
-        {
-            var name = sheet.TryGetRow(r.ItemId, out var row) ? row.Name.ExtractText() : $"#{r.ItemId}";
-            var arrow = r.NewPrice < r.OldPrice ? "↓" : "↑";
-            Plugin.ChatPrint($"  {name}{(r.IsHq ? " (HQ)" : "")} [{r.Retainer}]: {r.OldPrice:N0} → {r.NewPrice:N0} {arrow}");
-        }
-        foreach (var r in skippedSummaryRows)
-        {
-            var name = sheet.TryGetRow(r.ItemId, out var row) ? row.Name.ExtractText() : $"#{r.ItemId}";
-            if (r.Reason is RepriceReason.NoCompetitor or RepriceReason.NoData)
-            {
-                var reason = r.Reason == RepriceReason.NoData ? Strings.NoMarketData
-                    : configuration.MatchQuality.For(r.ItemId, r.Hq) ? Strings.NoCompetitor(r.Hq) : Strings.NoMarketCompetitor;
-                Plugin.ChatPrint($"{name} [{r.Retainer} #{r.Slot}] {string.Format(Strings.KeptPrice, r.OldPrice, reason)}");
-                continue;
-            }
-            var skipped = string.Format(Localization.Strings.SkippedPrice, RepriceRules.ReasonCode(r.Reason));
-            var percent = RepriceRules.ChangePercent(r.OldPrice, r.NewPrice);
-            Plugin.ChatPrint($"  {name}{(r.Hq ? " (HQ)" : "")} [{r.Retainer} #{r.Slot}] {skipped}: {r.OldPrice:N0} → {r.NewPrice:N0} ({percent:+0.##;-0.##;0}%)");
-        }
+        ChatEvents.AddRange(skippedSummaryRows.Values);
+        ChatEvents.AddRange(PrefillSummary.Values);
+        try { Plugin.Instance.PrintSummary(ChatEvents); }
+        catch (Exception ex) { log.Warning(ex, "[Restocky] Could not render chat summary"); }
+        ChatEvents.Clear();
+        skippedSummaryRows.Clear();
+        PrefillSummary.Clear();
     }
+
+    internal ChatEvent GuardEvent(uint item, bool hq, string retainer, long current, long proposed, RepriceReason reason, long floor)
+        => new(ChatCategory.Guards, "", item, hq, retainer, current, proposed,
+            reason == RepriceReason.MaxRaise ? configuration.MaxRaisePercent : configuration.MaxDropPercent,
+            !configuration.IsHeld(item, hq), Floor: floor);
 
     private void ObserveListingsNow()
     {
@@ -910,6 +933,7 @@ public sealed unsafe partial class Executor : IDisposable
 
     private void EnterJob()
     {
+        Plugin.Instance.Activity.Add("Retainer", CurrentJob.RetainerName);
         jobObserved = false;
         listedRetainerKey = null;
         lastStageAt = null;
@@ -1060,7 +1084,7 @@ public sealed unsafe partial class Executor : IDisposable
             },
             baitMatches.IncludeBaitForPlan,
             MarketFetchTimedOut,
-            PriceMatches.ForPlan);
+            PriceMatches.ForPlan, PriceMatches.ReviewedFloor);
 
         if (correction)
         {
@@ -1079,8 +1103,9 @@ public sealed unsafe partial class Executor : IDisposable
             AppendHistory(row);
             if (row.Reason is RepriceReason.MaxDrop or RepriceReason.MaxRaise)
                 ReportGuardedPrice(key, row);
-            if (row.Reason is RepriceReason.MaxDrop or RepriceReason.MaxRaise or RepriceReason.NoCompetitor or RepriceReason.NoData)
-                skippedSummaryRows.Add(row);
+            else if (row.Reason is RepriceReason.Held or RepriceReason.NoCompetitor or RepriceReason.NoData)
+                skippedSummaryRows[row] = new(ChatCategory.Skipped, $"{row.OldPrice:N0} · {Strings.PriceDecisionLabel(new(row.NewPrice, false, row.Reason, row.LowestCompetitor))}",
+                    row.ItemId, row.Hq, row.Retainer);
         }
         foreach (var b in plan.Baits)
         {
@@ -1098,8 +1123,7 @@ public sealed unsafe partial class Executor : IDisposable
     private void ReportGuardedPrice(string key, PriceHistoryRow row)
     {
         GuardedPrices[(key, row.Slot, row.ItemId, row.Hq)] = row.NewPrice;
-        Plugin.Instance?.PrintPriceMatchLink(row.ItemId, row.Hq, row.Retainer, row.OldPrice, row.NewPrice,
-            row.Reason, PriceMatches.ForPlan(row.ItemId, row.Hq));
+        skippedSummaryRows[row] = GuardEvent(row.ItemId, row.Hq, row.Retainer, row.OldPrice, row.NewPrice, row.Reason, row.ClampedFloor);
     }
 
     private void ReportBait(BaitNotice bait)
@@ -1108,7 +1132,8 @@ public sealed unsafe partial class Executor : IDisposable
             ? row.Name.ExtractText() : $"#{bait.ItemId}";
         var msg = BaitFinder.Format(name, bait);
         log.Information($"[Restocker] {msg}");
-        Plugin.Instance?.PrintBaitMatchLink(msg, name, bait);
+        ChatEvents.Add(ChatSummary.Bait(bait));
+        Plugin.Instance.Activity.Add("Bait", msg);
     }
 
     private string ActiveRetainerKey()
@@ -1121,6 +1146,8 @@ public sealed unsafe partial class Executor : IDisposable
 
     private void AppendHistory(PriceHistoryRow row)
     {
+        if (row.Reason == RepriceReason.Error)
+            skippedSummaryRows[row] = new(ChatCategory.Problems, row.ErrorDetail ?? Strings.RunRepriceError, row.ItemId, row.Hq, row.Retainer);
         RecordRunDecision(row);
         if (History is { } history && !history.Append(row))
             log.Warning($"[Restocker] could not append to {history.Path}: retainer={row.Retainer} slot={row.Slot} item={row.ItemId} hq={row.Hq}");
@@ -1128,7 +1155,7 @@ public sealed unsafe partial class Executor : IDisposable
 
     internal void RecordRunDecision(PriceHistoryRow row, bool prefill = false)
     {
-        if (RunHistory is not { IsRecording: true } history) return;
+        if (RunHistory is not { } history) return;
         history.Add(RunEntry.FromPriceHistory(row, AutoRestockItemName(row.ItemId, row.Hq), prefill));
     }
 
@@ -1251,13 +1278,12 @@ public sealed unsafe partial class Executor : IDisposable
                     if (action.OldPrice == 0) action.OldPrice = livePrice;
 
                     // Settings can change after planning, while other slots are being processed.
-                    if (Mode == ExecutionMode.FullCycle && action.ClampedFloor > 0
+                    if (Mode == ExecutionMode.FullCycle && action.ClampedFloor > 0 && !action.MatchedPrice
                         && RepriceRules.LimitExceeded(livePrice, action.UnitPrice, 0, configuration.MaxRaisePercent) == RepriceReason.MaxRaise)
                     {
                         RepricesSkipped++;
                         var row = WriteHistory(action, action.UnitPrice, false, RepriceReason.MaxRaise);
                         ReportGuardedPrice(action.RetainerKey, row);
-                        skippedSummaryRows.Add(row);
                         runEta.FinishReprice(CurrentJob, runClock.Elapsed, StepThrottle);
                         Throttle();
                         return;
@@ -1278,6 +1304,11 @@ public sealed unsafe partial class Executor : IDisposable
                 // server 側でアイテム移動と出品が同時にコミットされる。
                 {
                     var sellList = AddonHelper.GetVisible("RetainerSellList");
+                    if (action.NeedsCrystalWithdrawal && !confirmedWithdrawals.Contains(action))
+                    {
+                        CompleteListing(RestockSkipReason.CrystalWithdrawalFailed);
+                        return;
+                    }
                     if (sellList == null || (action.StockRestock && ActiveRetainerKey() != action.RetainerKey)
                         || unconfirmedTopUpItems.Contains((action.ItemId, action.IsHQ))
                         || (autoRestockPass && !CanAutoRestock(action)))
@@ -1354,17 +1385,9 @@ public sealed unsafe partial class Executor : IDisposable
 
         if (action.MatchedBait) baitMatches.Consume(action.ItemId, action.IsHQ);
         else if (Mode == ExecutionMode.FullCycle) PriceMatches.Consume(action.ItemId, action.IsHQ);
-        if (action.MatchedPrice)
-            Plugin.ChatPrint(string.Format(Strings.PriceMatchApplied, Plugin.MarketItemName(action.ItemId, action.IsHQ),
-                action.OldPrice, price, RepriceRules.ChangePercent(action.OldPrice, price)));
-        if (action.BypassedMaxDrop)
-        {
-            var sheet = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Item>();
-            var name = sheet.TryGetRow(action.ItemId, out var row) ? row.Name.ExtractText() : $"#{action.ItemId}";
-            if (action.IsHQ) name += " (HQ)";
-            var drop = -RepriceRules.ChangePercent(action.OldPrice, price);
-            Plugin.ChatPrint(string.Format(Localization.Strings.BaitMatchMaxDrop, name, drop));
-        }
+        var detail = action.MatchedPrice ? " · matched" : action.BypassedMaxDrop ? " · matched bait" : "";
+        ChatEvents.Add(new(ChatCategory.Prices, detail, action.ItemId, action.IsHQ, CurrentJob.RetainerName,
+            action.OldPrice, price));
 
         if (configuration.Snapshots.TryGetValue(action.RetainerKey, out var snapshot)
             && snapshot.TryUpdateListingPrice(action.ListingIndex, action.ItemId, action.IsHQ, price))
@@ -1609,7 +1632,7 @@ public sealed unsafe partial class Executor : IDisposable
         var im = FFXIVClientStructs.FFXIV.Client.Game.InventoryManager.Instance();
         if (im == null) return false;
 
-        if (action.Quantity <= 0)
+        if (action.Quantity <= 0 || action.Quantity > InventoryEntry.ListingLimit(action.ItemId, int.MaxValue))
         {
             log.Warning($"[Restocker] ExecuteDirectListing: quantity={action.Quantity} invalid, skipping");
             return false;
@@ -1640,7 +1663,7 @@ public sealed unsafe partial class Executor : IDisposable
         foreach (var t in candidates)
         {
             var c = im->GetInventoryContainer(t);
-            if (c == null || (action.StockRestock && !c->IsLoaded)) continue;
+            if (c == null || !c->IsLoaded) continue;
             for (var i = 0; i < c->Size; i++)
             {
                 var item = c->GetInventorySlot(i);
@@ -1715,34 +1738,10 @@ public sealed unsafe partial class Executor : IDisposable
         return list.ToArray();
     }
 
-    private static readonly InventoryType[] RetainerInventoryContainersStatic =
-    {
-        InventoryType.RetainerPage1, InventoryType.RetainerPage2, InventoryType.RetainerPage3,
-        InventoryType.RetainerPage4, InventoryType.RetainerPage5, InventoryType.RetainerPage6,
-        InventoryType.RetainerPage7,
-    };
+    private static InventoryType[] RetainerInventoryContainersStatic => RetainerWatcher.RetainerPages;
 
     private static InventoryType[] SourceContainersFor(string sourceKey)
-    {
-        if (sourceKey.StartsWith("char."))
-        {
-            // saddle / bag どちらの場合も MoveToRetainerMarket は char bag からしか動かない。
-            // saddle source は staging で char bag に運んでから出品するため、
-            // 検索対象も char bag のみ (見つからなければ caller が staging に走る)。
-            return new[]
-            {
-                InventoryType.Inventory1, InventoryType.Inventory2,
-                InventoryType.Inventory3, InventoryType.Inventory4,
-            };
-        }
-        // retainer source -> retainer's own pages
-        return new[]
-        {
-            InventoryType.RetainerPage1, InventoryType.RetainerPage2, InventoryType.RetainerPage3,
-            InventoryType.RetainerPage4, InventoryType.RetainerPage5, InventoryType.RetainerPage6,
-            InventoryType.RetainerPage7,
-        };
-    }
+        => sourceKey.StartsWith("char.") ? CharBagContainers : RetainerInventoryContainersStatic;
 
     private static readonly InventoryType[] SaddleContainers =
     {
@@ -1750,11 +1749,7 @@ public sealed unsafe partial class Executor : IDisposable
         InventoryType.PremiumSaddleBag1, InventoryType.PremiumSaddleBag2,
     };
 
-    private static readonly InventoryType[] CharBagContainers =
-    {
-        InventoryType.Inventory1, InventoryType.Inventory2,
-        InventoryType.Inventory3, InventoryType.Inventory4,
-    };
+    private static InventoryType[] CharBagContainers => RetainerWatcher.CharacterPages;
 
     /// <summary>キャラバッグに該当アイテムが minQuantity 以上入った slot があるか。</summary>
     private bool HasItemInCharBag(uint itemId, bool isHQ, int minQuantity)
@@ -2412,7 +2407,7 @@ public sealed unsafe partial class Executor : IDisposable
                 || AddonHelper.IsOpen("ItemSearchResult") || AddonHelper.IsOpen("ContextMenu") || !SelectStringHelper.HasEntry(AddonText.IsQuitEntry))
             { AwaitRetainerMenu("retainer quit menu"); return; }
             historyRetainerKey = null;
-            PrintAutoRestockResults();
+            FlushSummary();
             FinishVisit();
             State = ExecutionState.Done;
             RunHistory?.Finish(DateTime.UtcNow, Strings.RunCompleted);
@@ -2442,17 +2437,11 @@ public sealed unsafe partial class Executor : IDisposable
                 Throttle();
                 return;
             }
-            PrintAutoRestockResults();
+            FlushSummary();
             State = ExecutionState.Done;
             RunHistory?.Finish(DateTime.UtcNow, Strings.RunCompleted);
             SaveEtaTimings();
             log.Info($"[Restocker] Executor done: {CompletedJobs} retainers, {CompletedActions} actions");
-            // Full cycles print their own summary + lines (AutoCycleController); everything else here.
-            if (Mode != ExecutionMode.FullCycle && AppliedReprices.Count > 0)
-            {
-                Plugin.ChatPrint($"done: {AppliedReprices.Count} price(s) changed");
-                PrintRepriceLines();
-            }
             return;
         }
         State = ExecutionState.SelectingRetainer;
@@ -2477,7 +2466,7 @@ public sealed unsafe partial class Executor : IDisposable
         }
         if (autoRestockSnapshots.Count != jobs.Count || (autoRetainerKey != null && active == null))
         {
-            Plugin.ChatPrint(Strings.AutoRestockIncompleteSnapshots);
+            ChatEvents.Add(new(ChatCategory.Skipped, Strings.AutoRestockIncompleteSnapshots));
             RunHistory?.Add(new RunEntry(string.Empty, RunEntryKind.RestockSkipped, Strings.AutoRestockIncompleteSnapshots));
             return false;
         }
@@ -2491,7 +2480,7 @@ public sealed unsafe partial class Executor : IDisposable
             var message = string.Format(Strings.AutoRestockSkipped, AutoRestockItemName(plan.ItemId, plan.IsHq),
                 plan.SkipReason == RestockSkipReason.None ? Strings.AutoRestockPriceLabel(plan.PriceKind)
                     : Strings.RestockSkipLabel(plan.SkipReason));
-            Plugin.ChatPrint(message);
+            ChatEvents.Add(new(ChatCategory.Skipped, message));
             RunHistory?.Add(new RunEntry(plan.RetainerName ?? string.Empty, RunEntryKind.RestockSkipped, message));
         }
 
@@ -2512,10 +2501,12 @@ public sealed unsafe partial class Executor : IDisposable
         foreach (var group in listings.GroupBy(a => a.RetainerKey))
         {
             var actions = group.ToList();
-            var job = new RetainerVisitJob { RetainerName = autoRestockSnapshots[group.Key].RetainerName, Actions = actions };
-            jobs.Add(job);
-            runEta!.SetWork(job, RunEtaWork.ForJob(job, runEta.Timings, [], configuration.IsHeld),
-                runClock.Elapsed, discovered: true);
+            foreach (var job in RetainerVisitJob.ListingVisits(actions, autoRestockSnapshots[group.Key].RetainerName, CrystalSourceName))
+            {
+                jobs.Add(job);
+                runEta!.SetWork(job, RunEtaWork.ForJob(job, runEta.Timings, [], configuration.IsHeld),
+                    runClock.Elapsed, discovered: true);
+            }
         }
         return true;
     }
@@ -2529,7 +2520,7 @@ public sealed unsafe partial class Executor : IDisposable
             var preferred = action.PreferredRetainerFallback!;
             var message = Strings.RetainerFallback(AutoRestockItemName(action.ItemId, action.IsHQ),
                 preferred, retainer.RetainerName, action.PreferredRetainerFullAtUtc);
-            Plugin.ChatPrint(message);
+            ChatEvents.Add(new(ChatCategory.Skipped, message));
             RunHistory?.Add(new RunEntry(preferred, RunEntryKind.RestockSkipped, message));
         }
     }
@@ -2538,7 +2529,7 @@ public sealed unsafe partial class Executor : IDisposable
 
     private bool CanAutoRestock(PlannedAction action) => configuration.AutoRestockDuringCycle
         && configuration.LowStock.Find(e => e.ItemId == action.ItemId && e.IsHq == action.IsHQ)
-            ?.EffectiveRestockMode == StockRestockMode.Auto
+            ?.AllowsAutoRestock == true
         && !configuration.IsHeld(action.ItemId, action.IsHQ)
         && (action.ResolveRestockPrice || ValidWritePrice(action));
 

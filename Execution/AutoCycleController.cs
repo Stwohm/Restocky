@@ -158,6 +158,7 @@ public sealed class AutoCycleController : IDisposable
         bellReopenAtUtc = null;
         if (cycleRunning && cycleIsAuto && executor.IsRunning) executor.Cancel(reason);
         if (!cycleRunning) ar.Release();
+        Plugin.Instance.Activity.Add("Auto cycle", $"Disabled · {reason}");
         Print($"auto cycle OFF: {reason}");
         log.Information($"[Restocker] auto cycle disabled: {reason}");
     }
@@ -174,6 +175,7 @@ public sealed class AutoCycleController : IDisposable
         if (!ar.Suppress())
         {
             LastSummary = "could not suppress AutoRetainer; cycle skipped";
+            Plugin.Instance.Activity.Add("Skipped", LastSummary);
             Print(LastSummary);
             return;
         }
@@ -231,12 +233,11 @@ public sealed class AutoCycleController : IDisposable
         {
             // Only this retainer was visited. Other retainers may still need a scheduled restock.
             if (!configuration.AutoRestockDuringCycle
-                || !configuration.LowStock.Exists(e => e.EffectiveRestockMode == StockRestockMode.Auto))
+                || !configuration.LowStock.Exists(e => e.AllowsAutoRestock))
                 RestartCountdown();
             ConsecutiveFailures = 0;
             LastSummary = string.Format(Strings.AutoRetainerCycleDone, executor.RepricesApplied, executor.RepricesSkipped);
             Print(LastSummary);
-            executor.PrintRepriceLines();
         }
         else
         {
@@ -348,9 +349,7 @@ public sealed class AutoCycleController : IDisposable
             : $"{stamp} stopped: {executor.StatusMessage}";
         log.Information($"[Restocker] cycle finished: {LastSummary}");
 
-        // Summary + one line per changed price, for manual and auto runs alike.
-        Print(LastSummary);
-        if (ok) executor.PrintRepriceLines();
+        if (ok) Print(LastSummary);
         if (!cycleIsAuto) return;
         if (!Enabled) return;
 
@@ -370,7 +369,7 @@ public sealed class AutoCycleController : IDisposable
         else
         {
             ConsecutiveFailures++;
-            Print($"cycle failed ({ConsecutiveFailures}/{configuration.AutoCycleMaxFailures}): {executor.StatusMessage}");
+            log.Warning($"[Restocky] cycle failed ({ConsecutiveFailures}/{configuration.AutoCycleMaxFailures}): {executor.StatusMessage}");
             if (ConsecutiveFailures >= Math.Max(1, configuration.AutoCycleMaxFailures))
             {
                 Disable($"{ConsecutiveFailures} failed cycles in a row");
@@ -378,19 +377,6 @@ public sealed class AutoCycleController : IDisposable
             }
         }
         ScheduleNext();
-    }
-
-    /// <summary>"Ascendant Twine [RetainerA]: 84,999 → 84,998" for every price written this run.</summary>
-    private void PrintRepriceLines()
-    {
-        if (executor.AppliedReprices.Count == 0) return;
-        var sheet = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Item>();
-        foreach (var r in executor.AppliedReprices)
-        {
-            var name = sheet.TryGetRow(r.ItemId, out var row) ? row.Name.ExtractText() : $"#{r.ItemId}";
-            var arrow = r.NewPrice < r.OldPrice ? "↓" : "↑";
-            Print($"  {name}{(r.IsHq ? " (HQ)" : "")} [{r.Retainer}]: {r.OldPrice:N0} → {r.NewPrice:N0} {arrow}");
-        }
     }
 
     private string? UnsafeReason()

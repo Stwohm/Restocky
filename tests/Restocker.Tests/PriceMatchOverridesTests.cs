@@ -30,15 +30,16 @@ public class PriceMatchOverridesTests
     }
 
     [Fact]
-    public void Notices_deduplicate_across_retainers_and_reoffer_after_a_rejected_review()
+    public void Floor_review_is_specific_to_the_clicked_quality_and_cycle()
     {
         var matches = new PriceMatchOverrides();
-        Assert.True(matches.ShouldReport(42, false, RepriceReason.MaxDrop, 190));
-        Assert.False(matches.ShouldReport(42, false, RepriceReason.MaxDrop, 190));
-        Assert.True(matches.ShouldReport(42, true, RepriceReason.MaxDrop, 190));
-        Assert.True(matches.ShouldReport(42, false, RepriceReason.MaxRaise, 190));
-        Assert.True(matches.ShouldReport(42, false, RepriceReason.MaxDrop, 190, rejectedReview: 250));
-        Assert.False(matches.ShouldReport(42, false, RepriceReason.MaxDrop, 190, rejectedReview: 250));
+        matches.Queue(42, true, 190, floor: true);
+        matches.BeginCycle();
+        Assert.True(matches.ReviewedFloor(42, true));
+        Assert.False(matches.ReviewedFloor(42, false));
+        matches.Consume(42, true);
+        matches.BeginCycle();
+        Assert.False(matches.ReviewedFloor(42, true));
     }
 
     [Fact]

@@ -121,6 +121,7 @@ public sealed class ListingTracker(SaleCostConsumer? consumeCost = null)
 
     /// <summary>Set by every mutation; the owner saves and clears it.</summary>
     public bool Dirty { get; set; }
+    internal event Action<ListingRecord>? SaleRecorded;
     internal event Action<ListingRecord, DateTime>? ListingSold;
 
     // A provisional absence is still listed until a sale or a confirmed disappearance.
@@ -426,7 +427,8 @@ public sealed class ListingTracker(SaleCostConsumer? consumeCost = null)
             .OrderByDescending(r => r.Outcome == Gone).ThenBy(r => r.EndedUtc ?? DateTime.MaxValue)
             .ThenBy(r => r.FirstSeenUtc).ThenBy(r => r.Id, StringComparer.Ordinal).FirstOrDefault();
 
-    private void ApplyHistory(ListingRecord rec, string key, DateTime time, long netGil, string? buyer, bool? mannequin)
+    private void ApplyHistory(ListingRecord rec, string key, DateTime time, long netGil, string? buyer, bool? mannequin,
+        bool alreadyRecorded = false)
     {
         if (!rec.HistoryOnly && rec.SoldGrossGil == null && NetFromGross(rec.LastPrice * rec.Quantity) == netGil)
             rec.SoldGrossGil = rec.LastPrice * rec.Quantity;
@@ -434,7 +436,7 @@ public sealed class ListingTracker(SaleCostConsumer? consumeCost = null)
         // Preserve the original notice source and receipt time for paired-notice deduplication.
         var source = rec.Outcome == Sold ? rec.SoldSource : "history";
         var receipt = rec.SoldRecordedUtc ?? (rec.Outcome == Sold ? rec.EndedUtc : null) ?? time;
-        MarkSold(rec, netGil, receipt, keepEndedUtc: false, source, saleUtc: time);
+        MarkSold(rec, netGil, receipt, keepEndedUtc: false, source, saleUtc: time, alreadyRecorded: alreadyRecorded);
         rec.EndedUtc = time;
         rec.HistoryKey = key;
         rec.SaleTimeUtc = time;
@@ -464,7 +466,7 @@ public sealed class ListingTracker(SaleCostConsumer? consumeCost = null)
                 target.ConsumedCost = row.ConsumedCost;
                 target.UnknownCostUnits = row.UnknownCostUnits;
             }
-            ApplyHistory(target, row.HistoryKey!, time, row.SoldTotalGil, row.BuyerName, row.IsMannequin);
+            ApplyHistory(target, row.HistoryKey!, time, row.SoldTotalGil, row.BuyerName, row.IsMannequin, alreadyRecorded: true);
             target.AllaganNoticeUtc ??= row.AllaganNoticeUtc;
             Records.Remove(row);
             log?.Invoke($"[Restocky] history: reconcile merged {target.ItemName} into {kind} record");
@@ -496,7 +498,7 @@ public sealed class ListingTracker(SaleCostConsumer? consumeCost = null)
     }
 
     private void MarkSold(ListingRecord rec, long totalGil, DateTime nowUtc, bool keepEndedUtc, string source,
-        DateTime? saleUtc = null)
+        DateTime? saleUtc = null, bool alreadyRecorded = false)
     {
         var newlySold = rec.Outcome != Sold;
         // Fork: history enrichment updates proceeds and timing on the same sold record.
@@ -510,6 +512,7 @@ public sealed class ListingTracker(SaleCostConsumer? consumeCost = null)
         rec.SoldSource = source;
         rec.MissingSinceUtc = null;
         Dirty = true;
+        if (newlySold && !alreadyRecorded) SaleRecorded?.Invoke(rec);
         if (newlySold && !rec.HistoryOnly && rec.Slot >= 0)
             ListingSold?.Invoke(rec, saleUtc ?? rec.EndedUtc ?? nowUtc);
     }

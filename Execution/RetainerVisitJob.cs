@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Restocker.Data;
@@ -15,6 +16,25 @@ public sealed class RetainerVisitJob
 
     /// <summary>このリテイナーで処理するアクション列。Refresh モードでは空。</summary>
     public required List<PlannedAction> Actions { get; init; }
+    internal PlannedAction? Withdrawal { get; init; }
+
+    internal static IEnumerable<RetainerVisitJob> ListingVisits(List<PlannedAction> actions, string target,
+        Func<string, string> sourceName)
+    {
+        List<PlannedAction> batch = [];
+        foreach (var action in actions)
+        {
+            if (batch.Count > 0 && (action.NeedsCrystalWithdrawal || action.ListsCharacterCrystals != batch[0].ListsCharacterCrystals))
+            {
+                yield return new() { RetainerName = target, Actions = batch };
+                batch = [];
+            }
+            if (action.NeedsCrystalWithdrawal)
+                yield return new() { RetainerName = sourceName(action.SourceKey), Withdrawal = action, Actions = [] };
+            batch.Add(action);
+        }
+        if (batch.Count > 0) yield return new() { RetainerName = target, Actions = batch };
+    }
 
     /// <summary>Fork: walk the sell list rows and fetch market prices before running Actions.</summary>
     public bool FetchPrices { get; init; }

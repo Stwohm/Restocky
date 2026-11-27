@@ -36,6 +36,9 @@ public sealed class PlannedAction
     internal string? PreferredRetainerFallback { get; init; }
     internal DateTime? PreferredRetainerFullAtUtc { get; init; }
     internal bool StockRestock { get; init; }
+    internal bool NeedsCrystalWithdrawal => StockRestock && InventoryEntry.IsCrystal(ItemId)
+        && SourceKey != RetainerKey && !SourceKey.StartsWith("char.");
+    internal bool ListsCharacterCrystals => StockRestock && InventoryEntry.IsCrystal(ItemId) && SourceKey != RetainerKey;
     internal bool ResolveRestockPrice { get; set; }
     internal Restocker.Plan.RestockPrice? RestockPrice { get; set; }
     internal Restocker.Plan.StackTopUp? TopUp { get; init; }

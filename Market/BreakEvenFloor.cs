@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 
 namespace Restocker.Market;
 
@@ -18,12 +20,14 @@ public static class BreakEvenFloor
         return (floor, true);
     }
 
-    public static bool ShouldRemoveManualFloor(long manualFloor, decimal? nqUnitCost, decimal? hqUnitCost,
-        decimal saleTaxPercent, decimal minProfitPercent)
+    internal static bool CommitManual(Dictionary<uint, long> floors, uint itemId, string text)
     {
-        var nqFloor = Resolve(0, nqUnitCost, saleTaxPercent, minProfitPercent).Price;
-        var hqFloor = Resolve(0, hqUnitCost, saleTaxPercent, minProfitPercent).Price;
-        var costFloor = Math.Max(nqFloor, hqFloor);
-        return costFloor > 0 && manualFloor < costFloor;
+        long value = 0;
+        if (text.Length > 0 && !long.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out value))
+            return false;
+        if (value == 0) return floors.Remove(itemId);
+        if (floors.GetValueOrDefault(itemId) == value) return false;
+        floors[itemId] = value;
+        return true;
     }
 }

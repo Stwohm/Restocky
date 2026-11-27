@@ -42,7 +42,8 @@ public static class AutoRepricePlanner
         Action<LiveListing, RepriceDecision, IReadOnlyList<MarketOffer>, IReadOnlyList<MarketOffer>>? onDecision = null,
         Func<uint, bool, bool>? includeBaitForPlan = null,
         Func<uint, bool>? marketTimedOut = null,
-        Func<uint, bool, long?>? reviewedPrice = null)
+        Func<uint, bool, long?>? reviewedPrice = null,
+        Func<uint, bool, bool>? reviewedFloor = null)
     {
         var result = new Result();
         foreach (var l in listings)
@@ -82,7 +83,7 @@ public static class AutoRepricePlanner
                 foreach (var o in offers) prices.Add(o.Price);
                 prices.Sort();
                 d = RepriceRules.Decide(l.UnitPrice, prices, floorFor(l.ItemId, l.IsHQ), settings, includeBait,
-                    reviewedPrice?.Invoke(l.ItemId, l.IsHQ));
+                    reviewedPrice?.Invoke(l.ItemId, l.IsHQ), reviewedFloor?.Invoke(l.ItemId, l.IsHQ) == true);
                 undercutters = MarketOfferFormat.Undercutters(offers, l.UnitPrice);
                 dropped = BaitFinder.Dropped(offers, d.LowestCompetitor);
                 if (dropped.Count > 0)

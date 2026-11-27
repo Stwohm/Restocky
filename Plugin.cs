@@ -10,6 +10,7 @@ using Dalamud.Utility;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using Dalamud.Interface.Windowing;
+using Restocker.Common;
 using Restocker.Windows;
 using Restocker.Localization;
 using Restocker.Execution;
@@ -47,6 +48,8 @@ public sealed class Plugin : IDalamudPlugin
     // Bait link IDs have the high bit set. Price links carry their own item and reviewed price.
     private const uint MatchNqPrice = 0x40000000;
     private const uint MatchHqPrice = MatchNqPrice + 1;
+    private readonly DalamudLinkPayload priceLinkNq;
+    private readonly DalamudLinkPayload priceLinkHq;
 
     public static Configuration Configuration { get; private set; } = null!;
     public static Plugin Instance { get; private set; } = null!;
@@ -65,6 +68,7 @@ public sealed class Plugin : IDalamudPlugin
     // Fork: market purchase cost basis.
     private CostLedgerHost Costs { get; }
     private AutoCycleController AutoCycle { get; }
+    internal ActivityLog Activity { get; }
     public TrackerHost Tracker { get; }
     public Restocker.Plan.LowStockService LowStock { get; private set; } = null!;
 
@@ -74,14 +78,17 @@ public sealed class Plugin : IDalamudPlugin
         Configuration = PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
         Strings.SetLanguage(Configuration.ResolveLanguage(ClientState.ClientLanguage));
 
+        Activity = new(System.IO.Path.Combine(PluginInterface.GetPluginConfigDirectory(), "activity-log.jsonl"),
+            message => Log.Warning($"[Restocky] Activity log: {message}"));
         MarketWatcher = new MarketWatcher(MarketBoard, ObjectTable, Log);
         MarketWatcher.Cache.RestorePrices(Configuration.RestockMarketPrices ?? []);
         Undercuts = new UndercutHistoryHost(MarketWatcher, Configuration, Framework, PlayerState, ObjectTable, Log,
             PluginInterface.GetPluginConfigDirectory());
         Costs = new CostLedgerHost(MarketBoard, Framework, Log, PluginInterface.GetPluginConfigDirectory());
-        MigrateCostFloorOverrides();
         Tracker = new TrackerHost(Framework, ChatGui, DataManager, Log, PluginInterface.GetPluginConfigDirectory(),
             Configuration, Costs.Ledger.Consume);
+        Tracker.Tracker.SaleRecorded += sale => Activity.Add("Sale",
+            $"{sale.ItemName}{(sale.IsHq ? " (HQ)" : "")} [{sale.RetainerName}] ×{sale.Quantity:N0} · {sale.SoldTotalGil:N0} gil");
         SaleHistory = new RetainerHistoryCapture(Tracker.Tracker);
         MarketWatcher.CompetitorsObserved += (item, scan) =>
         {
@@ -93,12 +100,12 @@ public sealed class Plugin : IDalamudPlugin
         };
         Executor = new Executor(Framework, Log, Configuration, Costs.Ledger, MarketWatcher.Cache);
         MarketWatcher.EmptyResultReplaced += Executor.OnEmptyResultReplaced;
-        ChatGui.AddChatLinkHandler(MatchNqPrice, OnMatchPrice);
-        ChatGui.AddChatLinkHandler(MatchHqPrice, OnMatchPrice);
+        priceLinkNq = ChatGui.AddChatLinkHandler(MatchNqPrice, OnMatchPrice);
+        priceLinkHq = ChatGui.AddChatLinkHandler(MatchHqPrice, OnMatchPrice);
         Executor.History = new PriceHistoryLog(
             System.IO.Path.Combine(PluginInterface.GetPluginConfigDirectory(), "price-history.csv"));
         Executor.RunHistory = new RunReportHistory(
-            System.IO.Path.Combine(PluginInterface.GetPluginConfigDirectory(), "runs.json"), message => Log.Warning(message));
+            System.IO.Path.Combine(PluginInterface.GetPluginConfigDirectory(), "runs.json"), message => Log.Warning(message), Activity.Add);
 
         ArDetector = new AutoRetainerDetector(PluginInterface, NotificationManager, Log);
         var arIpc = new AutoRetainerIpc(PluginInterface, Log, () => ArDetector.IsAutoRetainerLoaded());
@@ -142,26 +149,6 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.OpenConfigUi += ToggleMainUi;
         gilhoundBridge = new(PluginInterface.GetPluginConfigDirectory());
         AutoCycle.ListenForPostprocess();
-    }
-
-    private void MigrateCostFloorOverrides()
-    {
-        if (Configuration.CostFloorOverrideMigrated) return;
-
-        var ledger = Costs.Ledger;
-        var saleTax = (decimal)Configuration.SaleTaxPercent;
-        var minProfit = (decimal)Configuration.MinProfitPercent;
-        var obsoleteFloors = Configuration.PriceFloors
-            .Where(entry => BreakEvenFloor.ShouldRemoveManualFloor(entry.Value,
-                ledger.CurrentUnitCost(entry.Key, false), ledger.CurrentUnitCost(entry.Key, true), saleTax, minProfit))
-            .Select(entry => entry.Key)
-            .ToArray();
-        foreach (var itemId in obsoleteFloors)
-            Configuration.PriceFloors.Remove(itemId);
-
-        Configuration.CostFloorOverrideMigrated = true;
-        Configuration.Save();
-        Log.Information($"[Restocky] floor migration: removed {obsoleteFloors.Length} manual floors below cost");
     }
 
     public void Dispose()
@@ -220,12 +207,12 @@ public sealed class Plugin : IDalamudPlugin
         catch (Exception ex) { Log.Warning(ex, "[Restocker] chat print failed"); }
     }
 
-    internal void PrintBaitMatchLink(string message, string itemName, BaitNotice notice)
+    private Payload BaitLink(uint item, bool hq)
     {
-        var key = (notice.ItemId, notice.IsHq);
+        var key = (ItemId: item, IsHq: hq);
         if (!baitMatchLinks.TryGetValue(key, out var link))
         {
-            var displayName = notice.IsHq ? $"{itemName} (HQ)" : itemName;
+            var displayName = MarketItemName(item, hq);
             link = ChatGui.AddChatLinkHandler(BaitMatchOverrides.LinkId(key.ItemId, key.IsHq), (_, _) =>
             {
                 if (Configuration.IsHeld(key.ItemId, key.IsHq)) return;
@@ -235,7 +222,7 @@ public sealed class Plugin : IDalamudPlugin
             baitMatchLinks.Add(key, link);
         }
 
-        PrintMatchLink(message, link, Strings.MatchBait);
+        return link;
     }
 
     internal static string MarketItemName(uint item, bool hq)
@@ -245,16 +232,40 @@ public sealed class Plugin : IDalamudPlugin
         return hq ? $"{name} (HQ)" : name;
     }
 
-    internal void PrintPriceMatchLink(uint item, bool hq, string retainer, long current, long proposed,
-        RepriceReason reason, long? rejectedReview = null)
+    internal void PrintSummary(IEnumerable<ChatEvent> events)
     {
-        if (!Executor.PriceMatches.ShouldReport(item, hq, reason, proposed, rejectedReview)) return;
-        var message = $"{MarketItemName(item, hq)} [{retainer}] {Strings.PriceWarning(reason, current, proposed)}";
-        var encoded = new Lumina.Text.SeStringBuilder().PushDalamudLink(hq ? MatchHqPrice : MatchNqPrice,
-            PluginInterface.InternalName, checked((int)item), 0, proposed.ToString(CultureInfo.InvariantCulture));
-        // The chat dispatcher expects the typed payload's wire encoding in API 15.
-        if (!encoded.ToReadOnlySeString().Single().TryReadDalamudLink(out var link)) return;
-        PrintMatchLink(message, link, Strings.MatchPrice);
+        foreach (var group in ChatSummary.Format(events))
+        {
+            var builder = new SeStringBuilder().AddText($"[Restocky] {group.Title} ({group.Lines.Count})");
+            foreach (var line in group.Lines)
+            {
+                var e = line.Event;
+                builder.Add(NewLinePayload.Payload).AddText("  ");
+                if (e.Item != 0)
+                {
+                    if (DataManager.GetExcelSheet<Lumina.Excel.Sheets.Item>().HasRow(e.Item))
+                        builder.AddItemLink(e.Item, e.Hq).AddText(" ");
+                    else builder.AddText($"#{e.Item} ");
+                }
+                if (e.Category is ChatCategory.Prices or ChatCategory.Guards)
+                    builder.AddUiForeground(line.Text, (ushort)(e.Proposed < e.Old ? 17 : 45));
+                else builder.AddText(line.Text);
+                if (!e.Match || Configuration.IsHeld(e.Item, e.Hq)) continue;
+                builder.AddText(" ");
+                if (e.Category == ChatCategory.Bait) builder.Add(BaitLink(e.Item, e.Hq));
+                else
+                {
+                    var handler = e.Hq ? priceLinkHq : priceLinkNq;
+                    var encoded = new Lumina.Text.SeStringBuilder().PushDalamudLink(handler.CommandId,
+                        handler.Plugin, checked((int)e.Item), e.Floor > 0 ? 1 : 0,
+                        e.Proposed.ToString(CultureInfo.InvariantCulture));
+                    builder.Add(new RawPayload(encoded.ToReadOnlySeString().Data.ToArray()));
+                }
+                builder.AddUiForeground(e.Category == ChatCategory.Bait ? $"[{Strings.MatchBait}]" : "[Match]", 45)
+                    .Add(RawPayload.LinkTerminator);
+            }
+            PrintChatMessage(builder.Build());
+        }
     }
 
     private void OnMatchPrice(uint command, SeString message)
@@ -265,18 +276,8 @@ public sealed class Plugin : IDalamudPlugin
         var item = (uint)link.Extra1;
         var hq = command == MatchHqPrice;
         if (Configuration.IsHeld(item, hq)) return;
-        Executor.PriceMatches.Queue(item, hq, proposed);
+        Executor.PriceMatches.Queue(item, hq, proposed, link.Extra2 == 1);
         ChatPrint(string.Format(Strings.PriceMatchQueued, MarketItemName(item, hq), proposed));
-    }
-
-    private static void PrintMatchLink(string message, Payload link, string label)
-    {
-        PrintChatMessage(new SeStringBuilder()
-            .AddText($"[Restocky] {message} ")
-            .Add(link)
-            .AddUiForeground($"[{label}]", 45)
-            .Add(RawPayload.LinkTerminator)
-            .Build());
     }
 
     /// <summary>Executor 用: 自動 fetch 中に「期待アイテム」フィルタを設定。</summary>

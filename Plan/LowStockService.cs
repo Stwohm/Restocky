@@ -58,7 +58,7 @@ public sealed class LowStockService : IDisposable
     /// <summary>Watched items at or below their threshold, with the listed count.</summary>
     public List<(LowStockEntry Entry, int Listed)> LowItems()
         => configuration.LowStock.Select(e => (e, ListedUnits(e.ItemId, e.IsHq)))
-            .Where(x => x.Item2 <= x.e.Threshold).ToList();
+            .Where(x => x.e.IsLow(x.Item2)).ToList();
 
     public int ListedUnits(uint itemId, bool hq) => ListedStock(itemId, hq).Listed;
 
@@ -103,7 +103,7 @@ public sealed class LowStockService : IDisposable
 
     internal RestockPrice PriceForRestock(LowStockEntry e)
     {
-        if (e.Price > 0) return new(e.Price, AutoRestockPriceKind.Manual);
+        if (e.Price > 0) return new(ApplyFloor(e, e.Price), AutoRestockPriceKind.Manual);
         var ours = CurrentPrice(e);
         if (ours > 0) return new(ApplyFloor(e, ours), AutoRestockPriceKind.Listing);
         var offer = marketCache.CachedLowest(Plugin.Instance.MarketWatcher.HomeWorldId, e.ItemId, e.IsHq,
@@ -140,19 +140,25 @@ public sealed class LowStockService : IDisposable
     {
         var freshness = new StockFreshness(now, loginUtc, Math.Max(1, configuration.StockMaxAgeHours));
         var character = configuration.Characters.GetValueOrDefault(CharacterSnapshot.MakeKey(Cid()));
+        var crystals = InventoryEntry.IsCrystal(entry.ItemId);
         var inventory = new List<StockSourceReading>
         {
-            new(Strings.StockBag, ReadInventory(character?.Bag ?? [], RetainerWatcher.CharacterBagTypes, character?.InventoryRefreshedUtc)),
-            new(Strings.StockSaddlebag, ReadInventory(character?.Saddlebag ?? [], RetainerWatcher.SaddlebagTypes, character?.InventoryRefreshedUtc)),
-            new(Strings.StockPremiumSaddlebag, ReadInventory(character?.PremiumSaddlebag ?? [], RetainerWatcher.PremiumSaddlebagTypes,
-                character?.InventoryRefreshedUtc)),
+            new(crystals ? "Crystals" : Strings.StockBag, ReadInventory(character?.Bag ?? [],
+                crystals ? RetainerWatcher.PlayerCrystals : RetainerWatcher.CharacterPages, character?.InventoryRefreshedUtc)),
         };
+        if (!crystals)
+        {
+            inventory.Add(new(Strings.StockSaddlebag, ReadInventory(character?.Saddlebag ?? [],
+                RetainerWatcher.SaddlebagTypes, character?.InventoryRefreshedUtc)));
+            inventory.Add(new(Strings.StockPremiumSaddlebag, ReadInventory(character?.PremiumSaddlebag ?? [],
+                RetainerWatcher.PremiumSaddlebagTypes, character?.InventoryRefreshedUtc)));
+        }
         var listings = new List<StockSourceReading>();
         var active = tracker.ActiveFor(entry.ItemId, entry.IsHq).ToLookup(l => l.RetainerKey);
         foreach (var retainer in retainers)
         {
             inventory.Add(new(string.Format(Strings.StockRetainerInventory, retainer.RetainerName),
-                ReadInventory(retainer.Inventory, RetainerWatcher.RetainerInventoryTypes, retainer.InventoryRefreshedUtc)));
+                ReadInventory(retainer.Inventory, crystals ? RetainerWatcher.RetainerCrystals : RetainerWatcher.RetainerPages, retainer.InventoryRefreshedUtc)));
             var records = active[retainer.Key];
             listings.Add(new(string.Format(Strings.StockRetainerListed, retainer.RetainerName),
                 freshness.Count(records.Sum(l => l.Quantity), retainer.LastRefreshedUtc),
@@ -189,6 +195,8 @@ public sealed class LowStockService : IDisposable
         foreach (var actions in plan.Actions.GroupBy(a => a.RetainerKey))
         {
             var name = retainers.First(r => r.Key == actions.Key).RetainerName;
+            foreach (var source in actions.Where(a => a.NeedsCrystalWithdrawal).GroupBy(a => a.SourceKey))
+                lines.Add(Strings.CrystalTransferPlan(retainers.First(r => r.Key == source.Key).RetainerName, source.Sum(a => a.Quantity), name));
             var units = actions.Sum(a => a.Quantity);
             lines.Add(plan.PriceKind == AutoRestockPriceKind.Pending
                 ? string.Format(Strings.StockCycleCompare, name, units)
@@ -218,23 +226,25 @@ public sealed class LowStockService : IDisposable
         IReadOnlyDictionary<string, int>? freeSlots = null)
     {
         var cid = Cid();
-        if (cid == 0) return [];
+        if (!e.Enabled || cid == 0) return [];
         var retainers = MyRetainers().ToList();
         var sources = Sources(e.ItemId, e.IsHq);
         var listed = ListedUnits(e.ItemId, e.IsHq);
         var actions = new List<PlannedAction>();
+        var floor = configuration.EffectiveFloorFor(e.ItemId, e.IsHq, costLedger).Price;
+        if (unitPrice > 0) unitPrice = Math.Max(unitPrice, floor);
         if (allowTopUps && configuration.TopUpPartialStacksOnRestock && listed > 0 && sources.Count > 0
             && Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Item>().TryGetRow(e.ItemId, out var row))
         {
             var active = tracker.ActiveFor(e.ItemId, e.IsHq).Where(r => r.MissingSinceUtc == null)
                 .ToLookup(r => (r.RetainerKey, r.Slot));
-            var floor = configuration.EffectiveFloorFor(e.ItemId, e.IsHq, costLedger).Price;
             var listings = retainers.SelectMany(r => r.Listings
                 .Where(l => l.UnitPrice >= floor && active[(r.Key, l.ListingIndex)].Any(record => l.ItemId == record.ItemId
                     && l.IsHQ == record.IsHq && l.Quantity == record.Quantity))
                 .Select(l => (r.Key, l)));
             actions = StackTopUpPlanner.Plan(e.ItemId, e.IsHq, RetainerWatcher.ResolveMaxListingStack(row),
-                (int)row.StackSize, listings, sources, e.PerListing);
+                (int)row.StackSize, listings, sources, e.PerListing,
+                InventoryEntry.IsCrystal(e.ItemId) ? Math.Max(0, targetUnits - listed) : int.MaxValue);
             listed += actions.Sum(a => a.TopUp!.AddedUnits);
         }
 
@@ -294,6 +304,11 @@ public sealed class LowStockService : IDisposable
         foreach (var e in configuration.LowStock)
         {
             var key = (cid, e.ItemId, e.IsHq);
+            if (!e.Enabled)
+            {
+                notified.Remove(key);
+                continue;
+            }
             var listed = ListedUnits(e.ItemId, e.IsHq);
             var flag = notified.TryGetValue(key, out var f) && f;
             var fire = RestockPlanner.ShouldNotify(listed, e.Threshold, ref flag);

@@ -50,6 +50,33 @@ public class AutoRestockPlannerTests
     private const uint Other = 50971;
 
     [Fact]
+    public void Disabled_watch_is_excluded_from_low_stock_cycle_visit_and_selected_plans()
+    {
+        var entry = System.Text.Json.JsonSerializer.Deserialize<LowStockEntry>("{}")!;
+        entry.ItemId = Twine;
+        entry.Note = "First line\nSecond line";
+        var retainer = Retainer("RetainerA");
+        retainer.Inventory.Add(Stock(Twine, 3));
+        Assert.True(entry.IsLow(entry.Threshold));
+        Assert.Single(Plan([entry], [retainer]));
+
+        entry.Enabled = false;
+        entry = System.Text.Json.JsonSerializer.Deserialize<LowStockEntry>(
+            System.Text.Json.JsonSerializer.Serialize(entry))!;
+        Assert.False(entry.IsLow(0));
+        var plans = Plan([entry], [retainer]);
+        Assert.Empty(plans);
+        Assert.Empty(AutoRestockPlanner.ForVisit(plans, retainer, retainer));
+        Assert.Empty(RestockPlanner.PlanBatch([entry], new Dictionary<string, int>(),
+            (_, _) => throw new InvalidOperationException()).Actions);
+
+        entry.Enabled = true;
+        Assert.Equal("First line\nSecond line", entry.Note);
+        Assert.True(entry.IsLow(entry.Threshold));
+        Assert.Single(Plan([entry], [retainer]));
+    }
+
+    [Fact]
     public void Tops_up_by_units_at_the_lowest_live_price_after_repricings()
     {
         var a = Retainer("A", Listed(Twine, 1, 1_234), Listed(Twine, 1, 1_600));

@@ -159,30 +159,26 @@ public sealed unsafe class RetainerWatcher : IDisposable
         return result;
     }
 
-    /// <summary>
-    /// 1 出品スロットあたりの最大個数。FFXIV のリテイナーマーケット側は事実上
-    /// 99/listing が上限なので、stack size がそれ以上の物（999 stack の crystal 等）も
-    /// 99 にクリップする。
-    /// </summary>
     internal static int ResolveMaxListingStack(Item row)
-    {
-        var inventoryStack = (int)row.StackSize;
-        if (inventoryStack <= 0) return 1;
-        return System.Math.Min(inventoryStack, 99);
-    }
+        => InventoryEntry.ListingLimit(row.RowId, (int)row.StackSize);
 
-    internal static readonly InventoryType[] RetainerInventoryTypes =
+    internal static readonly InventoryType[] RetainerPages =
     [
         InventoryType.RetainerPage1, InventoryType.RetainerPage2, InventoryType.RetainerPage3,
         InventoryType.RetainerPage4, InventoryType.RetainerPage5, InventoryType.RetainerPage6,
         InventoryType.RetainerPage7,
     ];
 
-    internal static readonly InventoryType[] CharacterBagTypes =
+    internal static readonly InventoryType[] CharacterPages =
     [
         InventoryType.Inventory1, InventoryType.Inventory2,
         InventoryType.Inventory3, InventoryType.Inventory4,
     ];
+
+    internal static readonly InventoryType[] PlayerCrystals = [InventoryType.Crystals];
+    internal static readonly InventoryType[] RetainerCrystals = [InventoryType.RetainerCrystals];
+    private static readonly InventoryType[] CharacterBagTypes = [.. CharacterPages, .. PlayerCrystals];
+    private static readonly InventoryType[] RetainerInventoryTypes = [.. RetainerPages, .. RetainerCrystals];
 
     internal static readonly InventoryType[] SaddlebagTypes =
     [
@@ -240,17 +236,41 @@ public sealed unsafe class RetainerWatcher : IDisposable
         };
     }
 
-    internal static DateTime RetainerInventoryFreshness(RetainerSnapshot snapshot)
-        => InventorySnapshot.OldestRefresh(RetainerInventoryTypes.Select(type => (uint)type),
-            snapshot.InventoryRefreshedUtc, snapshot.LastRefreshedUtc);
+    private static InventoryType[] StockContainers(uint? itemId, InventoryType[] all, InventoryType[] pages, InventoryType[] crystals)
+        => itemId is { } id ? (InventoryEntry.IsCrystal(id) ? crystals : pages) : all;
 
-    internal static DateTime CharacterInventoryFreshness(CharacterSnapshot snapshot, bool saddle)
+    // Snapshots predating per-container timestamps never captured crystal balances.
+    private static DateTime LegacyInventoryRead(uint? itemId, DateTime previous)
+        => itemId is { } id && !InventoryEntry.IsCrystal(id) ? previous : DateTime.MinValue;
+
+    internal static DateTime RetainerInventoryFreshness(RetainerSnapshot snapshot, uint? itemId = null)
     {
-        var types = saddle ? SaddlebagTypes : CharacterBagTypes;
+        var types = StockContainers(itemId, RetainerInventoryTypes, RetainerPages, RetainerCrystals);
+        return InventorySnapshot.OldestRefresh(types.Select(type => (uint)type), snapshot.InventoryRefreshedUtc,
+            LegacyInventoryRead(itemId, snapshot.LastRefreshedUtc));
+    }
+
+    internal static DateTime CharacterInventoryFreshness(CharacterSnapshot snapshot, bool saddle, uint? itemId = null)
+    {
+        var types = saddle ? SaddlebagTypes : StockContainers(itemId, CharacterBagTypes, CharacterPages, PlayerCrystals);
         var containers = types.Select(type => (uint)type);
         if (saddle && PremiumSaddlebagTypes.Any(type => snapshot.InventoryRefreshedUtc?.ContainsKey((uint)type) == true))
             containers = containers.Concat(PremiumSaddlebagTypes.Select(type => (uint)type));
-        return InventorySnapshot.OldestRefresh(containers, snapshot.InventoryRefreshedUtc, snapshot.LastRefreshedUtc);
+        return InventorySnapshot.OldestRefresh(containers, snapshot.InventoryRefreshedUtc,
+            saddle ? snapshot.LastRefreshedUtc : LegacyInventoryRead(itemId, snapshot.LastRefreshedUtc));
+    }
+
+    internal bool RefreshCrystalWithdrawal(string sourceKey, uint itemId, int expectedSource, int expectedCharacter)
+    {
+        if (Market.RetainerHistoryCapture.ActiveKey(out _) != sourceKey ||
+            !configuration.Snapshots.TryGetValue(sourceKey, out var source)) return false;
+        var balances = ReadContainers(RetainerCrystals);
+        if (!balances.TryGetValue((uint)InventoryType.RetainerCrystals, out var crystals)) return false;
+        source.Inventory = InventorySnapshot.Refresh(source.Inventory, source.InventoryRefreshedUtc ??= new(), balances, DateTime.UtcNow);
+        var character = CaptureCharacterSnapshot(loadedOnly: false);
+        return character != null && character.InventoryRefreshedUtc?.GetValueOrDefault((uint)InventoryType.Crystals) == character.LastRefreshedUtc
+            && crystals.Where(i => i.ItemId == itemId).Sum(i => i.Quantity) == expectedSource
+            && character.Bag.Where(i => i.ContainerId == (uint)InventoryType.Crystals && i.ItemId == itemId).Sum(i => i.Quantity) == expectedCharacter;
     }
 
     private Dictionary<uint, List<InventoryEntry>> ReadContainers(InventoryType[] types)
@@ -268,7 +288,7 @@ public sealed unsafe class RetainerWatcher : IDisposable
             for (var i = 0; i < container->Size; i++)
             {
                 var item = container->GetInventorySlot(i);
-                if (item == null || item->ItemId == 0) continue;
+                if (item == null || item->ItemId == 0 || item->Quantity <= 0) continue;
                 var entry = new InventoryEntry
                 {
                     ItemId = item->ItemId,

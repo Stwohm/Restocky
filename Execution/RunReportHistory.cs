@@ -9,7 +9,7 @@ using Restocker.Market;
 
 namespace Restocker.Execution;
 
-internal enum RunMode { Full, Auto, AutoRetainer, Restock, FullPrefill }
+internal enum RunMode { Full, Auto, AutoRetainer, Restock, FullPrefill, Apply }
 internal enum RunEntryKind { Repriced, Kept, Held, Guarded, NoData, Restocked, RestockSkipped, TopUp, Error, Planned }
 
 internal sealed record RunEntry(string Retainer, RunEntryKind Kind, string Detail, bool HitFloor = false)
@@ -79,14 +79,16 @@ internal sealed record RunReport(DateTime StartedUtc, DateTime EndedUtc, RunMode
 internal sealed class RunReportHistory
 {
     private const int Capacity = 20;
+    private readonly Action<string, string>? activity;
     private readonly string path;
     private readonly Action<string>? warn;
     private readonly List<RunReport> reports = new();
     private (RunMode Mode, DateTime StartedUtc, List<RunEntry> Entries)? active;
     private bool dirty;
 
-    public RunReportHistory(string path, Action<string>? warn = null)
+    public RunReportHistory(string path, Action<string>? warn = null, Action<string, string>? activity = null)
     {
+        this.activity = activity;
         this.path = path;
         this.warn = warn;
         try
@@ -103,10 +105,15 @@ internal sealed class RunReportHistory
     public IReadOnlyList<RunReport> Reports => reports;
     public bool IsRecording => active != null;
 
-    public void Start(RunMode mode, DateTime nowUtc) => active = (mode, nowUtc, []);
+    public void Start(RunMode mode, DateTime nowUtc)
+    {
+        active = (mode, nowUtc, []);
+        activity?.Invoke("Cycle", $"{Strings.RunModeLabel(mode)} started");
+    }
 
     public void Add(RunEntry entry)
     {
+        activity?.Invoke(entry.Kind.ToString(), string.IsNullOrEmpty(entry.Retainer) ? entry.Detail : $"[{entry.Retainer}] {entry.Detail}");
         if (active is { } run) run.Entries.Add(entry);
     }
 
@@ -114,6 +121,7 @@ internal sealed class RunReportHistory
     {
         if (active is not { } run) return;
         active = null;
+        activity?.Invoke(stopped ? "Stopped" : "Cycle", $"{Strings.RunModeLabel(run.Mode)} ended after {nowUtc - run.StartedUtc:g} · {reason}");
         reports.Insert(0, new RunReport(run.StartedUtc, nowUtc, run.Mode, reason, stopped, run.Entries));
         if (reports.Count > Capacity) reports.RemoveAt(Capacity);
         dirty = true;

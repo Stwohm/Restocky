@@ -135,7 +135,7 @@ public static class AddonText
     internal static string MarketSearchRetry => TryRow(1997);
     internal static string MarketSearchRetryAlt => TryRow(1998);
 
-    private static string TryRow(uint rowId)
+    internal static string TryRow(uint rowId)
     {
         try { return SafeRowText(rowId); } catch { return string.Empty; }
     }

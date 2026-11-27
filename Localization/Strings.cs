@@ -57,6 +57,7 @@ public static class Strings
     public static string SaleTaxSetting => T("Sales tax %", "販売税率 %", "Verkaufssteuer %", "Taxe sur la vente %", "销售税率 %", "판매세 %");
     public static string MinProfitSetting => T("Minimum profit % of cost", "購入原価に対する最低利益率 %", "Mindestgewinn in % der Kosten", "Bénéfice minimal en % du coût", "最低利润（占成本的百分比）", "원가 대비 최소 이익률 %");
     public static string CostFloorTooltip => T("Floor {0:N0} (cost)", "最低価格 {0:N0}（原価）", "Mindestpreis {0:N0} (Kosten)", "Prix plancher {0:N0} (coût)", "底价 {0:N0}（成本）", "최저가 {0:N0} (원가)");
+    internal static string ManualFloorLabel => T("Manual", "手動", "Manuell", "Manuel", "手动", "수동");
     public static string ManualFloorTooltip => T("Floor {0:N0} (manual)", "最低価格 {0:N0}（手動）", "Mindestpreis {0:N0} (manuell)", "Prix plancher {0:N0} (manuel)", "底价 {0:N0}（手动）", "최저가 {0:N0} (수동)");
     public static string AutoPriceTooltip => T("Fetch live prices for every retainer and apply the undercut and floor. Changes above either percentage limit are skipped automatically.", "全リテイナーの相場を取得し、値下げ幅と最低価格を適用します。変動率の上限を超えた変更はスキップします。", "Marktpreise für alle Gehilfen abrufen und Unterbietung sowie Mindestpreis anwenden. Änderungen über den Prozentgrenzen werden übersprungen.", "Actualise les prix de tous les servants et applique la sous-cotation et le prix plancher. Les changements dépassant les limites sont ignorés.", "获取所有雇员的实时价格，应用压价和底价。自动跳过超过涨跌幅上限的变更。", "모든 집사의 시세를 확인하고 가격 인하 폭과 최저가를 적용합니다. 변동률 한도를 넘는 변경은 건너뜁니다.");
     public static string ManualPriceTooltip => T("Prefill New for every retainer using the automatic pricing rules. Review marked changes, edit prices, then add to the plan and apply.", "自動価格設定ルールで全リテイナーの新価格を入力します。警告のある変更を確認し、価格を編集してからプランに追加して適用してください。", "Neue Preise für alle Gehilfen nach den automatischen Preisregeln eintragen. Markierte Änderungen prüfen, Preise bearbeiten, zum Plan hinzufügen und anwenden.", "Préremplit les nouveaux prix de tous les servants selon les règles automatiques. Vérifiez les changements signalés, ajustez les prix, ajoutez-les au plan puis appliquez-le.", "按自动定价规则填入所有雇员的新价格。检查标记的变更，编辑价格，然后加入计划并应用。", "자동 가격 규칙으로 모든 집사의 새 가격을 채웁니다. 표시된 변경을 확인하고 가격을 수정한 뒤 계획에 추가하고 적용하세요.");
@@ -146,8 +147,15 @@ public static class Strings
         _ => T("price or floor outside the supported range", "価格または最低価格が範囲外", "Preis oder Mindestpreis außerhalb des gültigen Bereichs", "prix ou plancher hors limites", "价格或底价超出范围", "가격 또는 최저가가 허용 범위를 벗어남"),
     };
 
+    internal static string CrystalTransferPlan(string source, int quantity, string target) => string.Format(
+        T("Withdraw {0:N0} from {1} into your crystals, then list on {2}.", "{1}からクリスタルを{0:N0}個引き出して{2}で出品。",
+          "{0:N0} Kristalle von {1} entnehmen und bei {2} anbieten.", "Retirer {0:N0} cristaux de {1}, puis les vendre via {2}.",
+          "从{1}取回{0:N0}个水晶后由{2}上架。", "{1}에게서 크리스탈 {0:N0}개를 인출하여 {2}에 등록합니다."), quantity, source, target);
+
     internal static string RestockSkipLabel(RestockSkipReason reason) => reason switch
     {
+        RestockSkipReason.CrystalWithdrawalPending => T("crystal withdrawal pending for the next Full cycle or manual restock", "クリスタル引き出しは次のフル巡回または手動補充で実行", "Kristallentnahme beim nächsten vollen Durchlauf oder manuellen Auffüllen", "retrait des cristaux au prochain cycle complet ou réassort manuel", "水晶取回待下次完整循环或手动补货", "다음 전체 주기 또는 수동 보충 시 크리스탈 인출"),
+        RestockSkipReason.CrystalWithdrawalFailed => T("crystal withdrawal unconfirmed", "クリスタル引き出し未確認", "Kristallentnahme unbestätigt", "retrait des cristaux non confirmé", "水晶取回未确认", "크리스탈 인출 미확인"),
         RestockSkipReason.Unconfirmed => T("listing unconfirmed when the run stopped", "停止時に出品未確認", "Angebot beim Stopp unbestätigt", "annonce non confirmée à l’arrêt", "停止时挂单尚未确认", "중단 시 등록 미확인"),
         RestockSkipReason.NoStock => StockNoInventory,
         RestockSkipReason.NoSlot => StockNoMarketSlot,
@@ -292,6 +300,7 @@ public static class Strings
     internal static string RunWarning => "(!)";
     internal static string RunModeLabel(RunMode mode) => mode switch
     {
+        RunMode.Apply => "Apply",
         RunMode.Full => "Full",
         RunMode.Auto => "Auto",
         RunMode.AutoRetainer => "AR handoff",

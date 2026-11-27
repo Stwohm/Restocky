@@ -96,7 +96,7 @@ public static class RepriceRules
         long floor,
         RepriceSettings settings,
         bool includeBait = false,
-        long? reviewedPrice = null)
+        long? reviewedPrice = null, bool reviewedFloor = false)
     {
         if (competitorPricesAscending.Count == 0)
             return new RepriceDecision(currentPrice, false, RepriceReason.NoCompetitor, 0);
@@ -126,7 +126,7 @@ public static class RepriceRules
         {
             if (matchedBait && limit == RepriceReason.MaxDrop)
                 return new RepriceDecision(target, true, reason, picked) { BypassedMaxDrop = true, MatchedBait = true, ClampedFloor = clampedFloor };
-            if (!(limit == RepriceReason.MaxRaise && clampedFloor > 0)
+            if ((limit != RepriceReason.MaxRaise || clampedFloor == 0 || (reviewedFloor && reviewedPrice == clampedFloor))
                 && !matchedBait && reviewedPrice is > 0
                 && Math.Sign(target - currentPrice) == Math.Sign(reviewedPrice.Value - currentPrice)
                 && Math.Abs(target - currentPrice) <= Math.Abs(reviewedPrice.Value - currentPrice) + reviewedPrice.Value * 0.05m)

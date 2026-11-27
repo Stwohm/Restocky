@@ -21,6 +21,12 @@ public sealed class LowStockEntry
     public uint ItemId { get; set; }
     public bool IsHq { get; set; }
     public Dictionary<ulong, string> PreferredRetainers { get; set; } = new();
+    public bool Enabled { get; set; } = true;
+    public string Note { get; set; } = string.Empty;
+
+    internal bool IsLow(int listed) => Enabled && listed <= Threshold;
+    internal bool AllowsAutoRestock => Enabled && EffectiveRestockMode == StockRestockMode.Auto;
+
     public StockKind Kind { get; set; }
     public StockStatus Status { get; set; }
     public StockRestockMode RestockMode { get; set; }
@@ -64,7 +70,7 @@ public static class RestockPlanner
         var actions = new List<PlannedAction>();
         var skipped = new List<LowStockEntry>();
         // Each quality has its own source pool. Plan it once, including its top-up reservations.
-        foreach (var entry in entries.DistinctBy(e => (e.ItemId, e.IsHq)))
+        foreach (var entry in entries.Where(e => e.Enabled).DistinctBy(e => (e.ItemId, e.IsHq)))
         {
             var row = planRow(entry, free);
             if (row.Count == 0) skipped.Add(entry);
@@ -143,6 +149,24 @@ public static class RestockPlanner
         }
 
         var indices = Enumerable.Range(0, sources.Count);
+        if (InventoryEntry.IsCrystal(itemId))
+        {
+            perListing = Math.Min(perListing, InventoryEntry.CrystalCapacity);
+            var targets = new[] { preferredKey }.OfType<string>().Concat(preferred)
+                .Concat(free.Keys.OrderByDescending(k => sources.Any(s => s.FixedTargetKey == k && s.Available > 0))
+                    .ThenByDescending(k => free[k])).Distinct().Where(HasRoom).ToArray();
+
+            foreach (var target in targets)
+            {
+                foreach (var i in indices.Where(i => sources[i].SourceKey.EndsWith(".bag")))
+                    AddListings(i, target);
+                foreach (var i in indices.Where(i => sources[i].FixedTargetKey == target))
+                    AddListings(i, target);
+                foreach (var i in indices.Where(i => sources[i].FixedTargetKey != null && sources[i].FixedTargetKey != target))
+                    AddListings(i, target);
+            }
+            return result;
+        }
         if (preferredKey != null && HasRoom(preferredKey))
         {
             foreach (var i in indices.Where(i => sources[i].FixedTargetKey == null || sources[i].FixedTargetKey == preferredKey)

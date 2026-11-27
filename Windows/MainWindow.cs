@@ -17,13 +17,25 @@ public sealed class MainWindow : Window, IDisposable
     private readonly RepriceTab repriceTab;
     private readonly ListTab listTab;
     private readonly SalesTab salesTab = new();
+    private readonly StatsTab statsTab = new();
+    private readonly LogsTab logsTab = new();
     private readonly RunsTab runsTab = new();
     private readonly CostsTab costsTab;
     private LowStockTab? lowStockTab;
     private readonly MarketCache marketCache;
     private readonly CostLedger costLedger;
     private readonly ConfirmDialog confirmDialog = new();
-    private (uint ItemId, int Value, int Frame)? activeFloorInput;
+    private (uint ItemId, string Text)? floorDraft;
+    private bool floorEditorActive;
+
+    private void CommitFloorDraft()
+    {
+        if (floorDraft is { } draft && BreakEvenFloor.CommitManual(configuration.PriceFloors, draft.ItemId, draft.Text))
+            configuration.Save();
+        floorDraft = null;
+    }
+
+    public override void OnClose() => CommitFloorDraft();
 
     public MainWindow(Configuration configuration, Executor executor, MarketWatcher marketWatcher, AutoCycleController autoCycle, CostLedger ledger)
         : base($"{Strings.WindowTitle}##MainWindow",
@@ -47,6 +59,7 @@ public sealed class MainWindow : Window, IDisposable
 
     public override void Draw()
     {
+        floorEditorActive = false;
         confirmDialog.Draw();
         DrawHeader();
         ImGui.Separator();
@@ -78,6 +91,16 @@ public sealed class MainWindow : Window, IDisposable
                 salesTab.Draw();
                 ImGui.EndTabItem();
             }
+            if (ImGui.BeginTabItem("Stats"))
+            {
+                statsTab.Draw(Plugin.Instance.Tracker.Tracker);
+                ImGui.EndTabItem();
+            }
+            if (ImGui.BeginTabItem("Logs"))
+            {
+                logsTab.Draw(Plugin.Instance.Activity);
+                ImGui.EndTabItem();
+            }
             if (executor.RunHistory is { } history && ImGui.BeginTabItem(Strings.TabRuns))
             {
                 runsTab.Draw(history);
@@ -96,6 +119,7 @@ public sealed class MainWindow : Window, IDisposable
             }
             ImGui.EndTabBar();
         }
+        if (!floorEditorActive) CommitFloorDraft();
     }
 
     private void DrawHeader()
@@ -392,6 +416,7 @@ public sealed class MainWindow : Window, IDisposable
         // Items currently listed on any retainer (from snapshots) plus any item that already has a floor.
         var sheet = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Item>();
         var ids = configuration.Snapshots.Values.SelectMany(s => s.Listings).Select(l => l.ItemId)
+            .Concat(costLedger.GetLots().Select(l => l.ItemId))
             .Concat(configuration.PriceFloors.Keys).Concat(configuration.LowStock.Select(e => e.ItemId))
             .Concat(configuration.MatchQuality.NQ.Keys).Concat(configuration.MatchQuality.HQ.Keys).Distinct()
             .Select(id => (Id: id, Name: sheet.TryGetRow(id, out var row) ? row.Name.ExtractText() : $"#{id}"))
@@ -422,7 +447,6 @@ public sealed class MainWindow : Window, IDisposable
         ImGui.TableSetupColumn("Floor", ImGuiTableColumnFlags.WidthFixed, 120 + autoButtonSpace);
         ImGui.TableSetupColumn(Strings.MatchQuality, ImGuiTableColumnFlags.WidthFixed, 130);
         ImGui.TableHeadersRow();
-        var frame = ImGui.GetFrameCount();
         foreach (var (id, name) in ids)
         {
             ImGui.TableNextRow();
@@ -440,53 +464,48 @@ public sealed class MainWindow : Window, IDisposable
             if (marketText.Length == 0) ImGui.TextDisabled("not fetched");
             else ImGui.TextUnformatted(marketText);
             ImGui.TableNextColumn();
-            var floor = configuration.EffectiveFloorFor(id, false, costLedger);
-            var hqFloor = configuration.EffectiveFloorFor(id, true, costLedger);
-            if (hqFloor.Price > floor.Price) floor = hqFloor;
-            var isManual = floor.Price > 0 && !floor.FromCost;
-            var source = floor.FromCost ? Strings.CostFloorTooltip : Strings.ManualFloorTooltip;
-
-            // InputInt can only edit 32-bit values. Also show the exact floor if it exceeds that range.
-            var shownValue = (int)Math.Min(floor.Price, int.MaxValue);
-            if (floor.Price > int.MaxValue)
-                ImGui.TextUnformatted(floor.Price.ToString("N0"));
-
-            // ImGui can copy the active text back on an unchanged frame. Preserve the input
-            // value while focused so a changing cost floor cannot be mistaken for a user edit.
-            var inputValue = activeFloorInput is { } active && active.ItemId == id && active.Frame == frame - 1
-                ? active.Value
-                : shownValue;
-            var v = inputValue;
-            ImGui.SetNextItemWidth(isManual ? Math.Max(1, ImGui.GetContentRegionAvail().X - autoButtonSpace) : -1);
-            var edited = ImGui.InputInt($"##floor-{id}", ref v, 0) && v != inputValue;
-            if (ImGui.IsItemActive()) activeFloorInput = (id, v, frame);
-            if (floor.Price > 0 && ImGui.IsItemHovered())
-                ImGui.SetTooltip(string.Format(source, floor.Price));
-
-            if (isManual)
-            {
-                ImGui.SameLine();
-                if (ImGui.SmallButton($"{autoLabel}##floor-auto-{id}"))
-                {
-                    v = 0;
-                    edited = true;
-                }
-            }
-
-            if (edited && v > 0)
-            {
-                configuration.PriceFloors[id] = v;
-                configuration.Save();
-            }
-            else if (edited && configuration.PriceFloors.Remove(id))
-            {
-                configuration.Save();
-            }
+            DrawFloorInput(id, autoLabel, autoButtonSpace);
             ImGui.TableNextColumn();
             DrawMatchQuality(id, false);
             DrawMatchQuality(id, true);
         }
         ImGui.EndTable();
+    }
+
+    private void DrawFloorInput(uint id, string autoLabel, float autoButtonSpace)
+    {
+        var manual = configuration.FloorFor(id);
+        var text = floorDraft is { } draft && draft.ItemId == id ? draft.Text
+            : manual > 0 ? manual.ToString(System.Globalization.CultureInfo.InvariantCulture) : string.Empty;
+        var hint = autoLabel;
+        if (manual <= 0)
+        {
+            var nq = configuration.EffectiveFloorFor(id, false, costLedger).Price;
+            var hq = configuration.EffectiveFloorFor(id, true, costLedger).Price;
+            if (nq != hq) hint = $"NQ {nq:N0} / HQ {hq:N0}";
+            else if (nq > 0) hint = $"{autoLabel} {nq:N0}";
+        }
+
+        ImGui.SetNextItemWidth(manual > 0 ? Math.Max(1, ImGui.GetContentRegionAvail().X - autoButtonSpace) : -1);
+        // The default single-line input deactivates on Enter and returns text changes as they happen.
+        if (ImGui.InputTextWithHint($"##floor-{id}", hint, ref text, 32, ImGuiInputTextFlags.CharsDecimal))
+        {
+            if (floorDraft is { } previous && previous.ItemId != id) CommitFloorDraft();
+            floorDraft = (id, text);
+        }
+        if (ImGui.IsItemActive()) floorEditorActive = true;
+        if (ImGui.IsItemDeactivatedAfterEdit() && floorDraft?.ItemId == id) CommitFloorDraft();
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip(manual > 0 ? string.Format(Strings.ManualFloorTooltip, manual) : hint);
+        if (manual <= 0) return;
+
+        ImGui.SameLine();
+        if (ImGui.SmallButton($"{autoLabel}##floor-auto-{id}"))
+        {
+            floorDraft = (id, string.Empty);
+            CommitFloorDraft();
+        }
+        ImGui.TextDisabled(Strings.ManualFloorLabel);
     }
 
     private void DrawMatchQuality(uint itemId, bool hq)

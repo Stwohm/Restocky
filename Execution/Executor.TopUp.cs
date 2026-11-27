@@ -16,20 +16,28 @@ public sealed unsafe partial class Executor
     private sealed record TopUpMove(TopUpSlot Source, int SourceAfter, TopUpSlot Destination, int DestinationAfter,
         int RetainerUnits = 0, Dictionary<TopUpSlot, int>? BeforeSplit = null);
 
-    private sealed class TopUpRun(PlannedAction action, Dictionary<TopUpSlot, int> bagBefore, int retainerUnits)
+    private sealed class TopUpRun(PlannedAction action, Dictionary<TopUpSlot, int> balanceBefore, int retainerUnits)
     {
         internal PlannedAction Action { get; } = action;
-        internal Dictionary<TopUpSlot, int> BagBefore { get; } = bagBefore;
+        internal Dictionary<TopUpSlot, int> BalanceBefore { get; } = balanceBefore;
         internal TopUpSlot? ReturnedStack;
         internal TopUpMove? Move;
         internal int RetainerUnitsRemaining = retainerUnits;
-        internal int? BagBeforeRelist;
+        internal int? BalanceBeforeRelist;
         internal DateTime Deadline;
     }
 
     private TopUpRun? pendingTopUp;
     private readonly HashSet<(uint, bool)> unconfirmedTopUpItems = new();
     private static readonly TimeSpan TopUpTimeout = TimeSpan.FromSeconds(8);
+
+    private static bool WithdrawToRetainer(PlannedAction action)
+        => InventoryEntry.IsCrystal(action.ItemId) && action.TopUp!.RetainerUnits > 0;
+
+    private static InventoryType[] WithdrawalContainers(PlannedAction action)
+        => InventoryEntry.IsCrystal(action.ItemId)
+            ? (WithdrawToRetainer(action) ? RetainerWatcher.RetainerCrystals : RetainerWatcher.PlayerCrystals)
+            : CharBagContainers;
 
     private void StartTopUp(PlannedAction action)
     {
@@ -45,24 +53,34 @@ public sealed unsafe partial class Executor
             return;
         }
 
-        var bag = ReadTopUpStacks(im, CharBagContainers, action);
-        var bagsLoaded = CharBagContainers.All(t => IsTopUpContainerLoaded(im, t));
-        if (!bagsLoaded || bag.Values.Sum() < topUp.BagUnits + topUp.SaddleUnits
-            || (topUp.RetainerUnits > 0 && ReadTopUpStacks(im, RetainerInventoryContainersStatic, action).Values.Sum() < topUp.RetainerUnits)
-            || FindTopUpBagRoom(im, bag, topUp.InventoryStackSize, topUp.OriginalQuantity) == null)
+        var containers = WithdrawalContainers(action);
+        var balances = ReadTopUpStacks(im, containers, action);
+        var available = balances.Values.Sum();
+        var crystal = InventoryEntry.IsCrystal(action.ItemId);
+        var required = crystal ? topUp.AddedUnits : topUp.BagUnits + topUp.SaddleUnits;
+        var hasRoom = crystal
+            ? available <= InventoryEntry.CrystalCapacity - topUp.OriginalQuantity
+                && action.Quantity <= InventoryEntry.CrystalCapacity
+            : FindTopUpBagRoom(im, balances, topUp.InventoryStackSize, topUp.OriginalQuantity) != null;
+        if (!containers.All(t => IsTopUpContainerLoaded(im, t)) || !hasRoom || available < required
+            || (!crystal && topUp.RetainerUnits > 0
+                && ReadTopUpStacks(im, RetainerInventoryContainersStatic, action).Values.Sum() < topUp.RetainerUnits))
         {
-            FailTopUp("planned inventory or bag space is no longer available");
+            FailTopUp("planned inventory or withdrawal space is no longer available");
             return;
         }
 
-        pendingTopUp = new TopUpRun(action, bag, topUp.RetainerUnits);
+        pendingTopUp = new TopUpRun(action, balances, crystal ? 0 : topUp.RetainerUnits);
         listedRetainerKey = action.RetainerKey;
         // Keep an unresolved withdrawal/relist slot out of the normal listing allocator.
         usedMarketSlots.Add(action.ListingIndex);
         State = ExecutionState.AwaitingTopUp;
         WaitForTopUpWrite(pendingTopUp);
-        var result = im->MoveFromRetainerMarketToPlayerInventory(InventoryType.RetainerMarket,
-            (ushort)action.ListingIndex, (uint)topUp.OriginalQuantity);
+        var slot = (ushort)action.ListingIndex;
+        var quantity = (uint)topUp.OriginalQuantity;
+        var result = WithdrawToRetainer(action)
+            ? im->MoveFromRetainerMarketToRetainerInventory(InventoryType.RetainerMarket, slot, quantity)
+            : im->MoveFromRetainerMarketToPlayerInventory(InventoryType.RetainerMarket, slot, quantity);
         log.Information($"[Restocker] top-up withdraw market#{action.ListingIndex} item={action.ItemId} qty={topUp.OriginalQuantity} result={result}");
     }
 
@@ -73,14 +91,15 @@ public sealed unsafe partial class Executor
         var topUp = action.TopUp!;
         var im = InventoryManager.Instance();
         var market = GetTopUpMarketSlot(im, action);
-        if (market == null || !CharBagContainers.All(t => IsTopUpContainerLoaded(im, t)))
+        var containers = WithdrawalContainers(action);
+        if (market == null || !containers.All(t => IsTopUpContainerLoaded(im, t)))
         {
             AwaitTopUpReadback(run, "active sell list or bags unavailable");
             return;
         }
 
-        var bag = ReadTopUpStacks(im, CharBagContainers, action);
-        if (run.BagBeforeRelist is { } bagBeforeRelist)
+        var bag = ReadTopUpStacks(im, containers, action);
+        if (run.BalanceBeforeRelist is { } bagBeforeRelist)
         {
             var price = (long)im->GetRetainerMarketPrice((short)action.ListingIndex);
             var bagDecrement = bagBeforeRelist - bag.Values.Sum();
@@ -88,6 +107,8 @@ public sealed unsafe partial class Executor
             if (TopUpReadback.Confirmed(MatchesTopUpMarketItem(market, action), market->Quantity, action.Quantity,
                     price, action.UnitPrice, bagDecrement))
             {
+                ChatEvents.Add(new(ChatCategory.Restocked, $"{topUp.OriginalQuantity} → {action.Quantity} @ {action.UnitPrice:N0}",
+                    action.ItemId, action.IsHQ, CurrentJob.RetainerName));
                 RunHistory?.Add(new RunEntry(CurrentJob.RetainerName, RunEntryKind.TopUp,
                     string.Format(Strings.RunTopUpDone, AutoRestockItemName(action.ItemId, action.IsHQ),
                         topUp.OriginalQuantity, action.Quantity, action.UnitPrice)));
@@ -104,13 +125,13 @@ public sealed unsafe partial class Executor
 
         if (run.ReturnedStack == null)
         {
-            if (market->ItemId != 0 || bag.Values.Sum() != run.BagBefore.Values.Sum() + topUp.OriginalQuantity)
+            if (market->ItemId != 0 || bag.Values.Sum() != run.BalanceBefore.Values.Sum() + topUp.OriginalQuantity)
             {
                 AwaitTopUpReadback(run, "withdrawal was not confirmed");
                 return;
             }
 
-            run.ReturnedStack = bag.Where(p => p.Value > run.BagBefore.GetValueOrDefault(p.Key))
+            run.ReturnedStack = bag.Where(p => p.Value > run.BalanceBefore.GetValueOrDefault(p.Key))
                 .OrderByDescending(p => p.Value).First().Key;
         }
         if (market->ItemId != 0)
@@ -144,6 +165,11 @@ public sealed unsafe partial class Executor
         }
         if (stackQuantity < action.Quantity)
         {
+            if (InventoryEntry.IsCrystal(action.ItemId))
+            {
+                FailTopUp("crystal balance changed after withdrawal");
+                return;
+            }
             var room = topUp.InventoryStackSize - stackQuantity;
             var source = bag.Where(p => p.Key != destination)
                 .OrderBy(p => p.Value > room).ThenByDescending(p => p.Value).FirstOrDefault();
@@ -165,7 +191,7 @@ public sealed unsafe partial class Executor
             FailTopUp("original price no longer meets the configured floor");
             return;
         }
-        run.BagBeforeRelist = bag.Values.Sum();
+        run.BalanceBeforeRelist = bag.Values.Sum();
         WaitForTopUpWrite(run);
         im->MoveToRetainerMarket(destination.Container, (ushort)destination.Index, InventoryType.RetainerMarket,
             (ushort)action.ListingIndex, (uint)action.Quantity, (uint)action.UnitPrice);
@@ -306,12 +332,12 @@ public sealed unsafe partial class Executor
         if (pendingTopUp is { } run)
         {
             var im = InventoryManager.Instance();
-            var bagCount = ReadTopUpStacks(im, CharBagContainers, action).Values.Sum();
+            var balance = ReadTopUpStacks(im, WithdrawalContainers(action), action).Values.Sum();
             var market = GetTopUpMarketSlot(im, action);
             if (run.ReturnedStack == null && MatchesTopUpMarketItem(market, action)
                 && market->Quantity == action.TopUp!.OriginalQuantity
                 && im->GetRetainerMarketPrice((short)action.ListingIndex) == (ulong)action.UnitPrice
-                && bagCount == run.BagBefore.Values.Sum())
+                && balance == run.BalanceBefore.Values.Sum())
             {
                 message = string.Format(Strings.TopUpStillListed, name, retainer, market->Quantity);
             }
@@ -319,12 +345,14 @@ public sealed unsafe partial class Executor
             {
                 // Keep a withdrawn or unresolved stack available for recovery.
                 unconfirmedTopUpItems.Add((action.ItemId, action.IsHQ));
-                if (market != null && market->ItemId == 0 && bagCount >= run.BagBefore.Values.Sum() + action.TopUp!.OriginalQuantity)
-                    message = string.Format(Strings.TopUpInBag, name, retainer, bagCount, action.TopUp.OriginalQuantity);
+                if (!WithdrawToRetainer(action) && market != null && market->ItemId == 0 && balance >= run.BalanceBefore.Values.Sum() + action.TopUp!.OriginalQuantity)
+                    message = string.Format(Strings.TopUpInBag, name, retainer, balance, action.TopUp.OriginalQuantity);
                 else
                 {
+                    var crystal = InventoryEntry.IsCrystal(action.ItemId);
+                    var bagCount = WithdrawToRetainer(action) ? ReadTopUpStacks(im, RetainerWatcher.PlayerCrystals, action).Values.Sum() : balance;
                     var retainerCount = market != null
-                        ? ReadTopUpStacks(im, RetainerInventoryContainersStatic, action).Values.Sum().ToString("N0")
+                        ? ReadTopUpStacks(im, crystal ? RetainerWatcher.RetainerCrystals : RetainerInventoryContainersStatic, action).Values.Sum().ToString("N0")
                         : "?";
                     message = string.Format(Strings.TopUpUnconfirmed, name, retainer, bagCount, retainerCount, action.ListingIndex + 1);
                 }
@@ -332,7 +360,7 @@ public sealed unsafe partial class Executor
         }
         else
             message = string.Format(Strings.TopUpSkipped, name, retainer);
-        Plugin.ChatPrint(message);
+        ChatEvents.Add(new(ChatCategory.Problems, message));
         RunHistory?.Add(new RunEntry(retainer, RunEntryKind.Error, message));
         FinishTopUp();
     }
