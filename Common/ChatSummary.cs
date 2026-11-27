@@ -4,7 +4,7 @@ using Restocker.Market;
 
 namespace Restocker.Common;
 
-internal enum ChatCategory { Prices, Guards, Bait, Skipped, Restocked, Problems }
+internal enum ChatCategory { Prices, Guards, Bait, Skipped, Restocked, Problems, Match }
 internal record ChatEvent(ChatCategory Category, string Detail, uint Item = 0, bool Hq = false,
     string Retainer = "", long Old = 0, long Proposed = 0, double Limit = 0, bool Match = false, long Floor = 0);
 internal record ChatLine(ChatEvent Event, string Text);
@@ -24,6 +24,7 @@ internal static class ChatSummary
             ChatCategory.Bait => "Bait skipped",
             ChatCategory.Skipped => "Skipped",
             ChatCategory.Restocked => "Restocked",
+            ChatCategory.Match => "Match",
             _ => "Problems"
         }, g.Select(e => new ChatLine(e, Describe(e))).ToList()));
 

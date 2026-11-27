@@ -24,6 +24,10 @@ public sealed class LowStockTab
     private StockKind kindFilter;
     private StockStatus statusFilter;
     private bool onlyLow;
+    private Guid? categoryFilter;
+    private Guid editingCategory;
+    private string categoryName = string.Empty;
+    private string? categoryError;
     private bool noteDirty;
     /// <summary>Price typed or picked for the next restock (session only).</summary>
     private readonly Dictionary<(uint, bool), RestockPrice> restockPrice = new();
@@ -68,10 +72,82 @@ public sealed class LowStockTab
         if (ImGui.Button(string.Format(Strings.StockRestockSelected, selected.Count.ToString("N0"))))
             RestockSelected(Plugin.PlayerState.ContentId);
         ImGui.EndDisabled();
+        DrawCategoryToolbar();
         if (search.Length >= 2) DrawAddResults();
         if (!string.IsNullOrEmpty(lastMessage)) ImGui.TextColored(new Vector4(0.95f, 0.8f, 0.4f, 1f), lastMessage);
         DrawTable(bellOpen, ready, selectLow);
     }
+
+    private void DrawCategoryToolbar()
+    {
+        var categories = configuration.StockCategories;
+        ImGui.SetNextItemWidth(ImGui.GetFontSize() * 12);
+        if (ImGui.BeginCombo("##category-filter", categoryFilter == null ? "All categories" : CategoryLabel(categoryFilter.Value)))
+        {
+            if (ImGui.Selectable("All categories", categoryFilter == null)) categoryFilter = null;
+            foreach (var id in CategoryIds())
+                if (ImGui.Selectable(CategoryLabel(id) + $"##filter-{id}", categoryFilter == id)) categoryFilter = id;
+            ImGui.EndCombo();
+        }
+        ImGui.SameLine();
+        if (ImGui.Button("Manage categories"))
+        {
+            editingCategory = Guid.Empty;
+            categoryName = string.Empty;
+            categoryError = null;
+            ImGui.OpenPopup("categories");
+        }
+        if (!ImGui.BeginPopup("categories")) return;
+        if (ImGui.BeginCombo("Category", editingCategory == Guid.Empty ? "New category" : CategoryLabel(editingCategory)))
+        {
+            if (ImGui.Selectable("New category##new")) EditCategory(Guid.Empty, "");
+            foreach (var c in categories.Ordered)
+                if (ImGui.Selectable(c.Name + $"##edit-{c.Id}")) EditCategory(c.Id, c.Name);
+            ImGui.EndCombo();
+        }
+        ImGui.InputText("Name", ref categoryName, 64);
+        var creating = editingCategory == Guid.Empty;
+        if (ImGui.Button(creating ? "Create" : "Rename"))
+        {
+            if (creating ? categories.Create(categoryName) : categories.Rename(editingCategory, categoryName))
+            {
+                EditCategory(Guid.Empty, "");
+                configuration.Save();
+            }
+            else categoryError = "Enter a unique name without ##.";
+        }
+        if (!creating)
+        {
+            ImGui.SameLine();
+            if (ImGui.Button("Delete category"))
+            {
+                categories.Delete(editingCategory, configuration.LowStock);
+                if (categoryFilter == editingCategory) categoryFilter = null;
+                EditCategory(Guid.Empty, "");
+                configuration.Save();
+            }
+        }
+        if (categoryError != null) ImGui.TextUnformatted(categoryError);
+        if (ImGui.Button("Add default categories"))
+        {
+            foreach (var name in new[] { "Crystals", "Flips", "Crafts", "Gather" }) categories.Create(name);
+            configuration.Save();
+        }
+        ImGui.EndPopup();
+    }
+
+    private void EditCategory(Guid id, string name)
+    {
+        editingCategory = id;
+        categoryName = name;
+        categoryError = null;
+    }
+
+    private IEnumerable<Guid> CategoryIds()
+        => configuration.StockCategories.Ordered.Select(c => c.Id).Append(Guid.Empty);
+
+    private string CategoryLabel(Guid id)
+        => configuration.StockCategories.Ordered.Find(c => c.Id == id)?.Name ?? StockCategories.Uncategorized;
 
     private void DrawAddResults()
     {
@@ -110,7 +186,7 @@ public sealed class LowStockTab
             .Select(e => (Entry: e, Name: ItemName(e.ItemId), Listed: service.ListedUnits(e.ItemId, e.IsHq)))
             .Where(r => r.Name.Contains(search, StringComparison.OrdinalIgnoreCase) && (!onlyLow || r.Entry.IsLow(r.Listed)))
             .OrderByDescending(r => r.Entry.Enabled).ThenByDescending(r => r.Entry.IsLow(r.Listed))
-            .ThenBy(r => r.Name).ThenBy(r => r.Entry.IsHq);
+            .ThenBy(r => r.Name).ThenBy(r => r.Entry.IsHq).ToLookup(r => r.Entry.CategoryId);
         const ImGuiTableFlags flags = ImGuiTableFlags.RowBg | ImGuiTableFlags.BordersInnerV | ImGuiTableFlags.ScrollY | ImGuiTableFlags.ScrollX;
         var availableWidth = ImGui.GetContentRegionAvail().X;
         if (!ImGui.BeginTable("##stock-items", 5, flags)) return;
@@ -125,13 +201,53 @@ public sealed class LowStockTab
         LowStockEntry? remove = null;
         var now = DateTime.UtcNow;
         var editingNote = false;
-        foreach (var (e, name, listed) in rows)
+        foreach (var categoryId in CategoryIds())
+        {
+            if (categoryFilter != null && categoryFilter != categoryId) continue;
+            var group = rows[categoryId];
+            var count = group.Count();
+            var category = configuration.StockCategories.Ordered.Find(c => c.Id == categoryId);
+            if (count == 0 && (search.Length > 0 || onlyLow || statusFilter != StockStatus.None || kindFilter != StockKind.None)) continue;
+            var collapsed = category?.Collapsed ?? configuration.StockCategories.UncategorizedCollapsed;
+            ImGui.TableNextRow();
+            ImGui.TableNextColumn();
+            if (ImGui.Selectable($"{(collapsed ? ">" : "v")} {CategoryLabel(categoryId)} ({count}, {group.Count(r => r.Entry.IsLow(r.Listed))} low)###group-{categoryId}"))
+            {
+                collapsed = !collapsed;
+                if (category != null) category.Collapsed = collapsed;
+                else configuration.StockCategories.UncategorizedCollapsed = collapsed;
+                configuration.Save();
+            }
+            foreach (var (e, name, listed) in group) DrawRow(e, name, listed, collapsed);
+        }
+        ImGui.EndTable();
+        if (noteDirty && !editingNote)
+        {
+            configuration.Save();
+            noteDirty = false;
+        }
+        if (remove != null)
+        {
+            var key = (remove.ItemId, remove.IsHq);
+            selected.Remove(key);
+            restockPrice.Remove(key);
+            configuration.LowStock.Remove(remove);
+            configuration.Save();
+        }
+
+        void DrawRow(LowStockEntry e, string name, int listed, bool collapsed)
         {
             var key = (e.ItemId, e.IsHq);
             var id = $"{e.ItemId}-{e.IsHq}";
             var low = e.IsLow(listed);
             var to = e.Target;
             var autoPrice = listed == 0;
+            if (collapsed && !(selectLow && low)) return;
+            var chosenPrice = autoPrice || !ready || !e.Enabled ? default : restockPrice.TryGetValue(key, out var rp) ? rp : service.PriceForRestock(e);
+            var actions = ready && e.Enabled ? service.PlanRestock(e, to, autoPrice ? 1 : chosenPrice.UnitPrice, allowTopUps: !autoPrice) : [];
+            var can = actions.Count > 0;
+            if (selectLow && low && can) selected.Add(key);
+            if (collapsed) return;
             var (inventory, listings) = service.StockReadings(e, retainers, now);
             ImGui.PushID(id);
             ImGui.TableNextRow();
@@ -205,11 +321,6 @@ public sealed class LowStockTab
             ImGui.EndDisabled();
 
             ImGui.TableNextColumn();
-            var chosenPrice = autoPrice || !ready || !e.Enabled ? default : restockPrice.TryGetValue(key, out var rp) ? rp : service.PriceForRestock(e);
-            // Automatic pricing uses a placeholder while laying out the new listings.
-            var actions = ready && e.Enabled ? service.PlanRestock(e, to, autoPrice ? 1 : chosenPrice.UnitPrice, allowTopUps: !autoPrice) : [];
-            var can = actions.Count > 0;
-            if (selectLow && low && can) selected.Add(key);
             if (!can) ImGui.BeginDisabled();
             if (ImGui.SmallButton($"{(autoPrice ? Strings.StockListAndPrice : Strings.StockRestock)}##rs-{id}"))
             {
@@ -242,20 +353,6 @@ public sealed class LowStockTab
             }
             ImGui.PopID();
         }
-        ImGui.EndTable();
-        if (noteDirty && !editingNote)
-        {
-            configuration.Save();
-            noteDirty = false;
-        }
-        if (remove != null)
-        {
-            var key = (remove.ItemId, remove.IsHq);
-            selected.Remove(key);
-            restockPrice.Remove(key);
-            configuration.LowStock.Remove(remove);
-            configuration.Save();
-        }
     }
 
     private static void RightAligned(string value)
@@ -278,6 +375,16 @@ public sealed class LowStockTab
     {
         var em = ImGui.GetFontSize();
         ImGui.TextUnformatted(name + (e.IsHq ? " (HQ)" : ""));
+        if (ImGui.BeginCombo("Category", CategoryLabel(e.CategoryId)))
+        {
+            foreach (var id in CategoryIds())
+                if (ImGui.Selectable(CategoryLabel(id), id == e.CategoryId))
+                {
+                    e.CategoryId = id;
+                    configuration.Save();
+                }
+            ImGui.EndCombo();
+        }
         DrawRowOptions(e, cid, names);
         DrawRestockMode(e);
         var to = e.Target;

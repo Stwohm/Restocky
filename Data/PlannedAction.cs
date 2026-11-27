@@ -55,6 +55,7 @@ public sealed class PlannedAction
     internal bool BypassedMaxDrop { get; set; }
     internal bool MatchedBait { get; set; }
     internal bool MatchedPrice { get; set; }
+    internal bool? ClickReviewedFloor { get; init; }
     internal long ClampedFloor { get; set; }
 
     /// <summary>Competitor retainers below our old price when planned, ';'-separated.</summary>

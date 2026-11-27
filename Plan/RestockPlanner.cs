@@ -20,6 +20,7 @@ public sealed class LowStockEntry
 {
     public uint ItemId { get; set; }
     public bool IsHq { get; set; }
+    public Guid CategoryId { get; set; }
     public Dictionary<ulong, string> PreferredRetainers { get; set; } = new();
     public bool Enabled { get; set; } = true;
     public string Note { get; set; } = string.Empty;

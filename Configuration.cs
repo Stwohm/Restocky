@@ -11,7 +11,7 @@ using Restocker.Plan;
 namespace Restocker;
 
 [Serializable]
-public sealed class Configuration : IPluginConfiguration
+public sealed class Configuration : StockTrackingConfiguration, IPluginConfiguration
 {
     public int Version { get; set; } = 1;
 
@@ -102,8 +102,6 @@ public sealed class Configuration : IPluginConfiguration
     /// so a Chat 2 "Market" tab that shows Retainer Sale Notifications picks them up.</summary>
     public int ChatChannel { get; set; } = (int)Dalamud.Game.Text.XivChatType.RetainerSale;
 
-    /// <summary>Items watched for low stock (alert + restock).</summary>
-    public List<Restocker.Plan.LowStockEntry> LowStock { get; set; } = new();
     public bool TopUpPartialStacksOnRestock { get; set; } = true;
 
     // Fork: age in whole days before an active listing is flagged as stuck.

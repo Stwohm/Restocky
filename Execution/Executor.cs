@@ -82,6 +82,11 @@ public sealed unsafe partial class Executor : IDisposable
 
     /// <summary>AwaitingNewListing 用: 直前の MoveToRetainerMarket の対象 market slot。</summary>
     private int pendingListingSlot = -1;
+    private InventoryType pendingSourceContainer;
+    private int pendingSourceSlot;
+    private int pendingSourceQuantity;
+    private bool sourceStayedUnchanged;
+    private bool listingRetried;
     private uint pendingListingItemId;
     private bool pendingListingIsHQ;
     private int pendingListingQuantity;
@@ -347,6 +352,7 @@ public sealed unsafe partial class Executor : IDisposable
             baitMatches.BeginCycle();
             PriceMatches.BeginCycle();
         }
+        else PriceMatches.BeginApply();
         collectAutoRestock = mode == ExecutionMode.FullCycle
             && configuration.AutoRestockDuringCycle
             && configuration.LowStock.Any(e => e.AllowsAutoRestock);
@@ -1244,7 +1250,7 @@ public sealed unsafe partial class Executor : IDisposable
                 {
                     currentJobActions.Dequeue();
                     CompletedActions++;
-                    if (Mode == ExecutionMode.FullCycle && configuration.IsHeld(action.ItemId, action.IsHQ))
+                    if ((Mode == ExecutionMode.FullCycle || action.MatchedPrice) && configuration.IsHeld(action.ItemId, action.IsHQ))
                     {
                         ListingsHeld++;
                         RepricesSkipped++;
@@ -1266,7 +1272,7 @@ public sealed unsafe partial class Executor : IDisposable
                     // Fork: the slot must still hold the item the plan was made for. A stale
                     // snapshot used to reprice whatever item had moved into that slot.
                     if (!TryReadRepriceSlot(im, action, out var livePrice)
-                        || (Mode == ExecutionMode.FullCycle && livePrice != action.OldPrice))
+                        || ((Mode == ExecutionMode.FullCycle || action.MatchedPrice) && livePrice != action.OldPrice))
                     {
                         log.Warning($"[Restocker] reprice skipped: could not verify {action.RetainerKey} slot={action.ListingIndex} item={action.ItemId} hq={action.IsHQ}");
                         RepricesSkipped++;
@@ -1329,7 +1335,8 @@ public sealed unsafe partial class Executor : IDisposable
                     // saddle source は AwaitingSellList → PreStagingSaddle で
                     // 必要量を bag に運んでからこの phase に入っている前提なので、
                     // 個別 staging はもう不要。bag に該当アイテムが無ければ skip。
-                    if (!ExecuteDirectListing(action, suppressWarning: false, dstSlotOut: out var dstSlot))
+                    listingRetried = false;
+                    if (!ExecuteDirectListing(action, out var dstSlot))
                     {
                         log.Warning($"[Restocker] NewListing skip (direct listing failed): item={action.ItemId} hq={action.IsHQ}");
                         CompleteListing(RestockSkipReason.WriteFailed);
@@ -1624,9 +1631,7 @@ public sealed unsafe partial class Executor : IDisposable
     /// 結局は実機の InventoryManager 全体から item を見つけたら即発火する。
     /// (UI のセクション操作ミスや snapshot stale を吸収するため。)
     /// </summary>
-    private bool ExecuteDirectListing(PlannedAction action) => ExecuteDirectListing(action, suppressWarning: false, dstSlotOut: out _);
-
-    private bool ExecuteDirectListing(PlannedAction action, bool suppressWarning, out int dstSlotOut)
+    private bool ExecuteDirectListing(PlannedAction action, out int dstSlotOut)
     {
         dstSlotOut = -1;
         var im = FFXIVClientStructs.FFXIV.Client.Game.InventoryManager.Instance();
@@ -1656,6 +1661,12 @@ public sealed unsafe partial class Executor : IDisposable
             if (s == null) continue;
             if (s->ItemId == 0) { dstSlot = i; break; }
         }
+        // The previous destination may be the only free slot. Re-read it before reusing it.
+        if (dstSlot < 0 && listingRetried && pendingListingSlot >= 0 && pendingListingSlot < market->Size)
+        {
+            var previous = market->GetInventorySlot(pendingListingSlot);
+            if (previous != null && previous->ItemId == 0) dstSlot = pendingListingSlot;
+        }
         if (dstSlot < 0) { log.Warning("[Restocker] no free RetainerMarket slot"); return false; }
 
         var candidates = ListingSourceContainers(action);
@@ -1671,6 +1682,11 @@ public sealed unsafe partial class Executor : IDisposable
 
                 var price = (uint)action.UnitPrice;
                 var srcQtyBefore = item->Quantity;
+                if (listingRetried && (pendingSourceContainer != t || pendingSourceSlot != i
+                    || pendingSourceQuantity != srcQtyBefore)) continue;
+                pendingSourceContainer = t;
+                pendingSourceSlot = i;
+                pendingSourceQuantity = srcQtyBefore;
                 im->MoveToRetainerMarket(
                     t, (ushort)i,
                     InventoryType.RetainerMarket, (ushort)dstSlot,
@@ -1680,14 +1696,13 @@ public sealed unsafe partial class Executor : IDisposable
                 dstSlotOut = dstSlot;
                 // 直後に client 側の市場 slot を確認: ここで反映されないなら API が no-op
                 var srcAfter = c->GetInventorySlot(i);
+                sourceStayedUnchanged = IsListingSource(srcAfter, action) && srcAfter->Quantity == srcQtyBefore;
                 var marketAfter = market->GetInventorySlot(dstSlot);
                 log.Information(
                     $"[Restocker] listed src={t}#{i}(qty before={srcQtyBefore} after={(srcAfter != null ? srcAfter->Quantity : -1)}) -> market#{dstSlot} (item={(marketAfter != null ? marketAfter->ItemId : 0)} qty={(marketAfter != null ? marketAfter->Quantity : -1)}) requested qty={action.Quantity} price={price}");
                 return true;
             }
         }
-
-        if (suppressWarning) return false;
 
         // 失敗時は、各 container に該当 item があれば（qty 不足でも）情報を残す
         log.Warning($"[Restocker] no source slot with itemId={action.ItemId} hq={action.IsHQ} qty>={action.Quantity} (src hint={action.SourceKey}, searched={string.Join(",", candidates)})");
@@ -2163,9 +2178,33 @@ public sealed unsafe partial class Executor : IDisposable
             }
         }
 
+        var listing = currentJobActions.Peek();
+        var source = im != null ? im->GetInventoryContainer(pendingSourceContainer) : null;
+        var sourceSlot = source != null && source->IsLoaded && pendingSourceSlot < source->Size
+            ? source->GetInventorySlot(pendingSourceSlot) : null;
+        int? observed = IsListingSource(sourceSlot, listing) ? sourceSlot->Quantity : null;
+        sourceStayedUnchanged &= observed == pendingSourceQuantity;
         if (waitingSince == null) waitingSince = DateTime.UtcNow;
         if (!IsRunning || DateTime.UtcNow - waitingSince.Value > TimeSpan.FromSeconds(8))
         {
+            if (ListingRetry.CanRetry(IsRunning, listingRetried, pendingSourceQuantity,
+                    sourceStayedUnchanged ? observed : null)
+                && slot != null && slot->ItemId != listing.ItemId && ActiveRetainerKey() == listing.RetainerKey
+                && AddonHelper.IsOpen("RetainerSellList") && !AddonHelper.IsOpen("RetainerSell")
+                && !AddonHelper.IsOpen("ItemSearchResult") && !AddonHelper.IsOpen("ContextMenu")
+                && (!autoRestockPass || CanAutoRestock(listing))
+                && Plugin.Instance.RetainerWatcher.CaptureActiveRetainerSnapshot()?.Key == listing.RetainerKey)
+            {
+                listingRetried = true;
+                if (ExecuteDirectListing(listing, out var freshSlot))
+                {
+                    log.Information($"[Restocker] new listing retry: unchanged {pendingSourceContainer}#{pendingSourceSlot}, market#{pendingListingSlot} -> market#{freshSlot}");
+                    pendingListingSlot = freshSlot;
+                    waitingSince = DateTime.UtcNow;
+                    Throttle();
+                    return;
+                }
+            }
             log.Warning($"[Restocker] new listing not confirmed in market#{pendingListingSlot} for item={pendingListingItemId} hq={pendingListingIsHQ} qty={pendingListingQuantity} (server lag or rejected). Skipping.");
             // A late server write could still arrive after the closing snapshot.
             if (autoRetainerKey != null) unconfirmedHandoffListing = true;
@@ -2539,7 +2578,9 @@ public sealed unsafe partial class Executor : IDisposable
             ? configuration.EffectiveFloorFor(action.ItemId, action.IsHQ, costLedger, action.RetainerKey,
                 ReadLiveListings().Where(l => l.ItemId == action.ItemId && l.IsHQ == action.IsHQ).Sum(l => (long)l.Quantity)).Price
             : AutoRestockFloor(action.ItemId, action.IsHQ);
-        return RestockPricing.IsValidPrice(action.UnitPrice, floor);
+        return action.ClickReviewedFloor is bool reviewed
+            ? MatchClickPlanner.AllowsPrice(action.OldPrice, action.UnitPrice, floor, reviewed, configuration.MaxRaisePercent)
+            : RestockPricing.IsValidPrice(action.UnitPrice, floor);
     }
 
     private static string AutoRestockItemName(uint itemId, bool hq)

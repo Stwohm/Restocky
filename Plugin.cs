@@ -279,20 +279,60 @@ public sealed class Plugin : IDalamudPlugin
             || !long.TryParse(link.ExtraString, NumberStyles.None, CultureInfo.InvariantCulture, out var proposed)
             || proposed <= 0)
         {
-            Log.Warning($"[Restocker] match click ignored: command={command} link={(link == null ? "none" : $"{link.Extra1}/{link.Extra2}/'{link.ExtraString}'")}");
+            ReportMatch(0, false, "ignored: invalid price link");
             return;
         }
         var item = (uint)link.Extra1;
         var hq = command == MatchHqPrice;
-        if (Configuration.IsHeld(item, hq))
+        var held = Configuration.IsHeld(item, hq);
+        if (held)
         {
-            Log.Information($"[Restocker] match click ignored: item={item} hq={hq} is on Hold");
-            ChatPrint(string.Format(Strings.PriceMatchHeld, MarketItemName(item, hq)));
+            ReportMatch(item, hq, "ignored: item is on Hold");
             return;
         }
-        Executor.PriceMatches.Queue(item, hq, proposed, link.Extra2 == 1);
-        Log.Information($"[Restocker] match click queued: item={item} hq={hq} proposed={proposed} floorReviewed={link.Extra2 == 1}");
-        ChatPrint(string.Format(Strings.PriceMatchQueued, MarketItemName(item, hq), proposed));
+        var floorReviewed = link.Extra2 == 1;
+        var matches = Executor.PriceMatches;
+        if (matches.IsPending(item, hq, proposed, floorReviewed, Executor.IsRunning))
+        {
+            ReportMatch(item, hq, "ignored: this match is already pending");
+            return;
+        }
+
+        string reason;
+        if (Executor.IsRunning) reason = "executor is running";
+        else if (!AddonHelper.IsOpen("RetainerList") || Execution.Executor.ActiveRetainersInDisplayOrder().Count == 0)
+            reason = "summoning bell retainer list is unavailable";
+        else
+        {
+            var plan = Plan.MatchClickPlanner.Plan(LowStock.CurrentRetainers(), item, hq, proposed, floorReviewed,
+                held, Configuration.EffectiveFloorFor(item, hq, Costs.Ledger).Price, Configuration.MaxRaisePercent);
+            if (plan.Actions.Count > 0)
+            {
+                Executor.StartApplyActions(plan.Actions);
+                if (Executor.IsRunning)
+                {
+                    matches.Started(item, hq, proposed, floorReviewed);
+                    var retainerCount = plan.Actions.Select(a => a.RetainerKey).Distinct().Count();
+                    ReportMatch(item, hq, $"started {plan.Actions.Count} listings on {retainerCount} retainers");
+                    return;
+                }
+                reason = "executor could not start the retainer visits";
+            }
+            else if (plan.FoundListing)
+            {
+                ReportMatch(item, hq, "ignored: listings already match or the proposed price is guarded");
+                return;
+            }
+            else reason = "no tracked listing for this item and quality";
+        }
+        matches.Queue(item, hq, proposed, floorReviewed);
+        ReportMatch(item, hq, $"queued: {reason} (next cycle)");
+    }
+
+    private void ReportMatch(uint item, bool hq, string outcome)
+    {
+        Log.Information($"[Restocker] match click: {outcome} (item={item} hq={hq})");
+        PrintSummary([new(ChatCategory.Match, outcome, item, hq)]);
     }
 
     /// <summary>Executor 用: 自動 fetch 中に「期待アイテム」フィルタを設定。</summary>
