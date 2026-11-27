@@ -251,16 +251,20 @@ public sealed class Plugin : IDalamudPlugin
                     builder.AddUiForeground(line.Text, (ushort)(e.Proposed < e.Old ? 17 : 45));
                 else builder.AddText(line.Text);
                 if (!e.Match || Configuration.IsHeld(e.Item, e.Hq)) continue;
-                builder.AddText(" ");
-                if (e.Category == ChatCategory.Bait) builder.Add(BaitLink(e.Item, e.Hq));
+                Payload? link;
+                if (e.Category == ChatCategory.Bait) link = BaitLink(e.Item, e.Hq);
                 else
                 {
+                    // Typed payload: Chat 2 renders a RawPayload-wrapped link as plain text.
                     var handler = e.Hq ? priceLinkHq : priceLinkNq;
-                    var encoded = new Lumina.Text.SeStringBuilder().PushDalamudLink(handler.CommandId,
-                        handler.Plugin, checked((int)e.Item), e.Floor > 0 ? 1 : 0,
-                        e.Proposed.ToString(CultureInfo.InvariantCulture));
-                    builder.Add(new RawPayload(encoded.ToReadOnlySeString().Data.ToArray()));
+                    link = ChatLinks.MatchPriceLink(handler.CommandId, handler.Plugin, e.Item, e.Floor > 0, e.Proposed);
+                    if (link == null)
+                    {
+                        Log.Warning($"[Restocker] match link could not be built for item={e.Item} hq={e.Hq} proposed={e.Proposed}");
+                        continue;
+                    }
                 }
+                builder.AddText(" ").Add(link);
                 builder.AddUiForeground(e.Category == ChatCategory.Bait ? $"[{Strings.MatchBait}]" : "[Match]", 45)
                     .Add(RawPayload.LinkTerminator);
             }
@@ -270,13 +274,24 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnMatchPrice(uint command, SeString message)
     {
-        if (message.Payloads.FirstOrDefault() is not DalamudLinkPayload { Extra1: > 0 } link
+        var link = message.Payloads.OfType<DalamudLinkPayload>().FirstOrDefault(l => l.CommandId == command);
+        if (link is not { Extra1: > 0 }
             || !long.TryParse(link.ExtraString, NumberStyles.None, CultureInfo.InvariantCulture, out var proposed)
-            || proposed <= 0) return;
+            || proposed <= 0)
+        {
+            Log.Warning($"[Restocker] match click ignored: command={command} link={(link == null ? "none" : $"{link.Extra1}/{link.Extra2}/'{link.ExtraString}'")}");
+            return;
+        }
         var item = (uint)link.Extra1;
         var hq = command == MatchHqPrice;
-        if (Configuration.IsHeld(item, hq)) return;
+        if (Configuration.IsHeld(item, hq))
+        {
+            Log.Information($"[Restocker] match click ignored: item={item} hq={hq} is on Hold");
+            ChatPrint(string.Format(Strings.PriceMatchHeld, MarketItemName(item, hq)));
+            return;
+        }
         Executor.PriceMatches.Queue(item, hq, proposed, link.Extra2 == 1);
+        Log.Information($"[Restocker] match click queued: item={item} hq={hq} proposed={proposed} floorReviewed={link.Extra2 == 1}");
         ChatPrint(string.Format(Strings.PriceMatchQueued, MarketItemName(item, hq), proposed));
     }
 
