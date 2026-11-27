@@ -126,7 +126,8 @@ public static class RepriceRules
         {
             if (matchedBait && limit == RepriceReason.MaxDrop)
                 return new RepriceDecision(target, true, reason, picked) { BypassedMaxDrop = true, MatchedBait = true, ClampedFloor = clampedFloor };
-            if (!matchedBait && reviewedPrice is > 0
+            if (!(limit == RepriceReason.MaxRaise && clampedFloor > 0)
+                && !matchedBait && reviewedPrice is > 0
                 && Math.Sign(target - currentPrice) == Math.Sign(reviewedPrice.Value - currentPrice)
                 && Math.Abs(target - currentPrice) <= Math.Abs(reviewedPrice.Value - currentPrice) + reviewedPrice.Value * 0.05m)
                 return new RepriceDecision(target, true, reason, picked) { MatchedPrice = true, ClampedFloor = clampedFloor };

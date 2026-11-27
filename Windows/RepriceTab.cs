@@ -32,6 +32,8 @@ public sealed class RepriceTab
     /// <summary>編集中の新価格。キーは "{retainerKey}#{listingIndex}"。</summary>
     private readonly Dictionary<string, (long Price, bool ClampedToFloor)> editedPrice = new();
     private string? lastMatchSummary;
+    private (string Key, DateTime Visit, int Undercut, bool RespectHold) lastPrefill;
+    private readonly Dictionary<string, long> prefilledPrices = new();
     /// <summary>明示的に展開したリテイナーセクションの key。デフォルトは折りたたみ。</summary>
     private readonly HashSet<string> expandedSections = new();
     /// <summary>「最安値 -Xギル」の X。セッション中のみ有効 (永続化しない)。</summary>
@@ -47,6 +49,12 @@ public sealed class RepriceTab
         this.confirmDialog = confirmDialog;
         this.marketCache = marketCache;
         this.costLedger = costLedger;
+        executor.LatePrefill += (key, item) =>
+        {
+            if (lastPrefill.Key == key && lastPrefill.Visit == executor.JobFetchStartUtc
+                && configuration.Snapshots.TryGetValue(key, out var snapshot))
+                ApplyMatchLowestForRetainer(snapshot, lastPrefill.Undercut, lastPrefill.RespectHold, item);
+        };
     }
 
     public void Draw()
@@ -232,6 +240,13 @@ public sealed class RepriceTab
         var snapshots = configuration.Snapshots.Values
             .OrderBy(s => s.CharacterName).ThenBy(s => s.RetainerName).ToList();
 
+        var preview = costLedger.CopyForEstimate();
+        var allocations = new Dictionary<ListingEntry, (decimal Cost, int Uncovered)>();
+        var now = DateTime.UtcNow;
+        foreach (var snapshot in snapshots.OrderBy(s => s.Key, StringComparer.Ordinal))
+            foreach (var listing in snapshot.Listings.OrderBy(l => l.ListingIndex))
+                allocations[listing] = preview.Consume(listing.ItemId, listing.IsHQ, listing.Quantity, now);
+
         foreach (var snap in snapshots)
         {
             var filteredListings = FilterListings(snap, sheet);
@@ -276,7 +291,7 @@ public sealed class RepriceTab
                 AddAllEditedToPlans(snap, sheet);
             }
 
-            DrawRetainerListings(snap, filteredListings);
+            DrawRetainerListings(snap, filteredListings, allocations);
         }
 
         ImGui.EndChild();
@@ -326,13 +341,15 @@ public sealed class RepriceTab
         => $"{snapKey}#{l.ListingIndex}#{l.ItemId}{(l.IsHQ ? "h" : "n")}";
 
     /// <summary>fetch 完了後に editedPrice に「最安値 + offset」を入れる。プランには勝手に積まない。</summary>
-    private void ApplyMatchLowestForRetainer(RetainerSnapshot capturedSnap, int undercut, bool respectHold = false)
+    private void ApplyMatchLowestForRetainer(RetainerSnapshot capturedSnap, int undercut, bool respectHold = false, uint? correctedItem = null)
     {
         // Fork: the fetch reopened the sell list, so RetainerWatcher stored a NEW snapshot
         // object. The one captured at click time is stale; always use the current one.
         var snap = configuration.Snapshots.TryGetValue(capturedSnap.Key, out var fresh) ? fresh : capturedSnap;
         // Fork: a skipped fetch row can still have a cached price from a previous visit.
         var since = executor.JobFetchStartUtc;
+        if (!correctedItem.HasValue) prefilledPrices.Clear();
+        lastPrefill = (snap.Key, since, undercut, respectHold);
         var seen = new HashSet<(uint, bool)>();
         var missing = new HashSet<(uint, bool, string)>();
         var applied = 0;
@@ -344,6 +361,10 @@ public sealed class RepriceTab
 
         foreach (var listing in snap.Listings)
         {
+            var editKey = EditKey(snap.Key, listing);
+            if (correctedItem.HasValue && (listing.ItemId != correctedItem
+                || !prefilledPrices.TryGetValue(editKey, out var previous)
+                || editedPrice.GetValueOrDefault(editKey).Price != previous)) continue;
             var matchQuality = configuration.MatchQuality.For(listing.ItemId, listing.IsHQ);
             var held = respectHold && configuration.IsHeld(listing.ItemId, listing.IsHQ);
             var timedOut = executor.MarketFetchTimedOut(listing.ItemId);
@@ -410,12 +431,14 @@ public sealed class RepriceTab
             {
                 var reason = matchQuality ? Strings.NoCompetitor(listing.IsHQ) : Strings.NoMarketCompetitor;
                 Plugin.ChatPrint($"{name} [{snap.RetainerName} #{listing.ListingIndex}] {string.Format(Strings.KeptPrice, current, reason)}");
-                editedPrice[EditKey(snap.Key, listing)] = (decision.NewPrice, false);
+                prefilledPrices[editKey] = decision.NewPrice;
+                editedPrice[editKey] = (decision.NewPrice, false);
                 Plugin.Log.Information($"  slot={listing.ListingIndex} item={listing.ItemId} hq={listing.IsHQ} name='{name}' {competitor} (skipped, no data)");
                 continue;
             }
             var newPrice = decision.NewPrice;
-            editedPrice[EditKey(snap.Key, listing)] = (newPrice, floor.FromCost && decision.Reason == RepriceReason.Floor);
+            prefilledPrices[editKey] = newPrice;
+            editedPrice[editKey] = (newPrice, floor.FromCost && decision.Reason == RepriceReason.Floor);
             if (decision.MarkForReview)
             {
                 if (configuration.IsHeld(listing.ItemId, listing.IsHQ))
@@ -430,6 +453,7 @@ public sealed class RepriceTab
             Plugin.Log.Information($"  slot={listing.ListingIndex} item={listing.ItemId} hq={listing.IsHQ} name='{name}' current={current:N0} {competitor} -> new={newPrice:N0}");
         }
 
+        if (correctedItem.HasValue) return;
         if (missing.Count == 0)
             lastMatchSummary = $"{snap.RetainerName}: " + string.Format(Strings.MatchAppliedSummary, applied, seen.Count);
         else
@@ -510,7 +534,8 @@ public sealed class RepriceTab
     // Fork: quality is displayed and searchable alongside the base item name.
     private static string DisplayListingName(ListingEntry listing, string name) => listing.IsHQ ? name + " (HQ)" : name;
 
-    private void DrawRetainerListings(RetainerSnapshot snap, List<(ListingEntry Entry, string ItemName)> rows)
+    private void DrawRetainerListings(RetainerSnapshot snap, List<(ListingEntry Entry, string ItemName)> rows,
+        Dictionary<ListingEntry, (decimal Cost, int Uncovered)> allocations)
     {
         const ImGuiTableFlags flags =
             ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp |
@@ -569,7 +594,7 @@ public sealed class RepriceTab
             ImGui.TableNextColumn();
             DrawPriceDecision(snap.Key, l, now);
             ImGui.TableNextColumn();
-            var returns = DrawProfit(l, editedPrice.GetValueOrDefault(editKey).Price);
+            var returns = DrawProfit(l, editedPrice.GetValueOrDefault(editKey).Price, allocations[l]);
             profit += returns.Profit.GetValueOrDefault();
             earning += returns.Earning.GetValueOrDefault();
             ImGui.TableNextColumn();
@@ -657,48 +682,43 @@ public sealed class RepriceTab
         ImGui.EndTooltip();
     }
 
-    // Estimate the whole listing using the next lot's unit cost.
-    private SaleReturn DrawProfit(ListingEntry listing, long edited)
+    private SaleReturn DrawProfit(ListingEntry listing, long edited, (decimal Cost, int Uncovered) allocation)
     {
         var price = edited > 0 ? edited : listing.UnitPrice;
         var saleTaxRate = (decimal)configuration.SaleTaxPercent / 100m;
-        var unitCost = costLedger.CurrentUnitCost(listing.ItemId, listing.IsHQ);
-        var returns = SaleReturn.Estimate(price, saleTaxRate, unitCost, listing.Quantity);
+        var covered = listing.Quantity - allocation.Uncovered;
+        var returns = SaleReturn.Estimate(price, saleTaxRate, allocation, listing.Quantity);
         if (returns.Profit is { } profit)
         {
             var color = profit > 0
                 ? new System.Numerics.Vector4(0.4f, 0.85f, 0.45f, 1f)
                 : new System.Numerics.Vector4(1f, 0.45f, 0.4f, 1f);
             ImGui.TextColored(color, profit.ToString("N0"));
+            if (ImGui.IsItemHovered()) DrawProfitDetails(listing, profit / covered, allocation.Cost / covered, saleTaxRate);
+            if (returns.Earning.HasValue) ImGui.SameLine();
         }
-        else if (returns.Earning is { } earning)
+        if (returns.Earning is { } earning)
         {
-            SaleReturnDisplay.DrawEarning(earning, "N0", string.Format(Strings.EarningPerUnit, earning / listing.Quantity));
+            SaleReturnDisplay.DrawEarning(earning, "N0", string.Format(Strings.EarningPerUnit, earning / allocation.Uncovered));
             return returns;
         }
-        else
-        {
-            ImGui.TextDisabled("—");
-            return returns;
-        }
+        if (!returns.Profit.HasValue) ImGui.TextDisabled("—");
+        return returns;
+    }
 
-        if (!ImGui.IsItemHovered()) return returns;
+    private void DrawProfitDetails(ListingEntry listing, decimal perUnit, decimal unitCost, decimal saleTaxRate)
+    {
         ImGui.BeginTooltip();
-        var perUnit = returns.Profit.GetValueOrDefault() / listing.Quantity;
-        var afterTax = perUnit + unitCost.GetValueOrDefault();
+        var afterTax = perUnit + unitCost;
         ImGui.TextUnformatted(string.Format(Strings.ProfitPerUnit, perUnit));
-        ImGui.TextUnformatted($"{Strings.CostUnitCost}  {unitCost?.ToString("N2") ?? "-"}");
+        ImGui.TextUnformatted($"{Strings.CostUnitCost}  {unitCost:N2}");
         ImGui.TextUnformatted(string.Format(Strings.CostPriceAfterTax, saleTaxRate, afterTax));
         ImGui.TextUnformatted($"{Strings.CostWeightedAverage}  {costLedger.WeightedAverageCost(listing.ItemId, listing.IsHQ)?.ToString("N2") ?? "-"}");
-        if (unitCost.HasValue)
-        {
-            ImGui.Separator();
-            ImGui.TextUnformatted(Strings.CostFifoLots);
-            foreach (var lot in costLedger.GetLots(listing.ItemId, listing.IsHQ))
-                ImGui.TextUnformatted(string.Format(Strings.CostLotDetails, lot.Utc.ToLocalTime(), lot.RemainingQuantity, lot.UnitCost, Strings.CostSourceName(lot.Source)));
-        }
+        ImGui.Separator();
+        ImGui.TextUnformatted(Strings.CostFifoLots);
+        foreach (var lot in costLedger.GetLots(listing.ItemId, listing.IsHQ))
+            ImGui.TextUnformatted(string.Format(Strings.CostLotDetails, lot.Utc.ToLocalTime(), lot.RemainingQuantity, lot.UnitCost, Strings.CostSourceName(lot.Source)));
         ImGui.EndTooltip();
-        return returns;
     }
 
     // Fork: display competitors from the last scan and the past week's most active rivals.

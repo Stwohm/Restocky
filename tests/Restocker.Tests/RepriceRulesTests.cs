@@ -101,22 +101,22 @@ public class RepriceRulesTests
     }
 
     [Fact]
-    public void Planner_applies_the_fifo_floor_for_each_quality_and_records_floor_reason()
+    public void Planner_applies_the_weighted_floor_for_each_quality_and_records_floor_reason()
     {
         var now = DateTime.UtcNow;
         var ledger = new CostLedger();
         ledger.AddManualLot(1, false, 1, 95m, now);
-        ledger.RecordLot(1, false, 1, 190m, now.AddSeconds(1));
+        ledger.RecordLot(1, false, 1, 133m, now.AddSeconds(1));
         ledger.RecordLot(1, true, 1, 114m, now);
         var listings = new[] { new LiveListing(0, 1, false, 1, 110), new LiveListing(1, 1, true, 1, 110) };
         var offers = new[] { new MarketOffer(91, "Rival", 1) };
 
         var plan = AutoRepricePlanner.Plan("k", "R", listings, (_, _) => offers,
-            (item, hq) => BreakEvenFloor.Resolve(0, ledger.CurrentUnitCost(item, hq), 5, 0).Price,
+            (item, hq) => BreakEvenFloor.Resolve(0, ledger.WeightedAverageCost(item, hq), 5, 0).Price,
             Default, now);
 
         Assert.Collection(plan.Actions,
-            nq => { Assert.Equal(100, nq.UnitPrice); Assert.Equal(RepriceReason.Floor, nq.Reason); },
+            nq => { Assert.Equal(120, nq.UnitPrice); Assert.Equal(RepriceReason.Floor, nq.Reason); },
             hq => { Assert.Equal(120, hq.UnitPrice); Assert.Equal(RepriceReason.Floor, hq.Reason); });
     }
 

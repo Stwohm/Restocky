@@ -67,6 +67,17 @@ public sealed class CostLedger
         }
     }
 
+    // Preview allocations use the same bought-first FIFO rules as recorded sales.
+    // A private copy lets multiple listed stacks share the available lots once.
+    internal CostLedger CopyForEstimate()
+    {
+        var copy = new CostLedger();
+        lock (gate)
+            foreach (var (key, queue) in lots)
+                copy.lots.Add(key, new List<CostLot>(queue));
+        return copy;
+    }
+
     /// <summary>Consumes only lots acquired by the given UTC time.</summary>
     public (decimal ConsumedCost, int UnknownUnits) Consume(uint itemId, bool hq, int qty, DateTime utc)
     {
@@ -112,11 +123,11 @@ public sealed class CostLedger
             return lots.TryGetValue((itemId, hq), out var queue) ? queue.Sum(lot => (long)lot.RemainingQuantity) : 0;
     }
 
-    public decimal? WeightedAverageCost(uint itemId, bool hq)
+    public decimal? WeightedAverageCost(uint itemId, bool hq, long heldUnits = 0)
     {
         lock (gate)
             return lots.TryGetValue((itemId, hq), out var queue)
-                ? queue.Sum(lot => lot.RemainingQuantity * lot.UnitCost) / queue.Sum(lot => (long)lot.RemainingQuantity)
+                ? queue.Sum(lot => lot.RemainingQuantity * lot.UnitCost) / Math.Max(heldUnits, queue.Sum(lot => (long)lot.RemainingQuantity))
                 : null;
     }
 

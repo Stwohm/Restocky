@@ -1,4 +1,3 @@
-using Restocker.Execution;
 using Restocker.Market;
 
 namespace Restocker.Tests;
@@ -8,27 +7,87 @@ public class MarketComparisonTests
     [Theory]
     [InlineData(599, 3999, false, true)]
     [InlineData(600, 0, false, false)]
-    [InlineData(1, 4000, false, false)]
+    [InlineData(1, 4000, false, true)]
     [InlineData(2000, 999, true, true)]
     [InlineData(999, 1500, true, true)]
-    [InlineData(1000, 1000, true, false)]
+    [InlineData(1199, 1500, true, true)]
+    [InlineData(1200, 1000, true, false)]
     public void Waits_for_quiet_before_click(int pageAge, int elapsed, bool retry, bool wait)
         => Assert.Equal(wait, MarketResultReadback.WaitBeforeClick(TimeSpan.FromMilliseconds(pageAge),
             TimeSpan.FromMilliseconds(elapsed), retry));
 
     [Theory]
-    [InlineData(true, 1199, false)]
-    [InlineData(true, 1200, true)]
-    [InlineData(false, 2499, false)]
-    [InlineData(false, 2500, true)]
-    public void Waiting_message_needs_time_and_matching_empty_proxy(bool history, int ms, bool empty)
+    [InlineData(799, 600, true)]
+    [InlineData(1500, 599, true)]
+    [InlineData(1500, 600, false)]
+    [InlineData(3000, 100, false)]
+    public void DuplicateDrainObservesTheRowCooldownLastPageAndCap(int elapsed, int quiet, bool wait)
+        => Assert.Equal(wait, MarketResultReadback.WaitForDuplicate(TimeSpan.FromMilliseconds(elapsed),
+            TimeSpan.FromMilliseconds(quiet), TimeSpan.FromMilliseconds(800)));
+
+    [Fact]
+    public void LarimarNeedsTwoSettledWaitingResults()
     {
-        var elapsed = TimeSpan.FromMilliseconds(ms);
-        Assert.Equal(empty, MarketResultReadback.IsEmpty(0, 0, false, false, true, history, elapsed));
-        Assert.False(MarketResultReadback.IsEmpty(0, null, false, false, true, history, elapsed));
-        Assert.False(MarketResultReadback.IsEmpty(0, 0, true, false, true, history, elapsed));
-        Assert.False(MarketResultReadback.IsEmpty(1, 0, false, false, true, history, elapsed));
-        Assert.False(MarketResultReadback.IsEmpty(0, 0, false, false, false, history, elapsed));
+        var elapsed = TimeSpan.FromSeconds(2.5);
+        Assert.Equal(MarketAttemptDecision.Retry, Decide(elapsed, waiting: true));
+        Assert.Equal(MarketAttemptDecision.Empty, Decide(elapsed, waiting: true, previous: true));
+        Assert.Equal(MarketAttemptDecision.Retry, Decide(elapsed, waiting: true, previous: true, overlap: true));
+    }
+
+    [Theory]
+    [InlineData(8u, 950)] // Fire Crystal
+    [InlineData(50973u, 350)] // Polish
+    public void ForeignPageRetriesThenAcceptsMatchingOffers(uint item, int age)
+    {
+        var stream = new OfferingStream();
+        var start = DateTime.UtcNow;
+        stream.Observe(50971, start.AddMilliseconds(-age));
+        Assert.Equal(MarketAttemptDecision.Retry, Decide(TimeSpan.FromSeconds(1),
+            empty: true, overlap: stream.Overlaps(item, start)));
+        stream.Observe(item, start.AddSeconds(2));
+        var cache = new MarketCache { Clock = () => start.AddSeconds(2) };
+        cache.Replace(item, new MarketScan([new MarketOffer(50, "Rival", 1)], []));
+        Assert.Equal(MarketAttemptDecision.Offers, Decide(TimeSpan.Zero,
+            offers: cache.GetScan(item)?.UpdatedUtc >= start, overlap: stream.Overlaps(item, start)));
+        Assert.Equal(50, cache.GetLowest(item, false, true));
+    }
+
+    [Fact]
+    public void ExplicitEmptyMessageFinishesFirstAttempt()
+        => Assert.Equal(MarketAttemptDecision.Empty, Decide(TimeSpan.FromSeconds(1), empty: true));
+
+    private static MarketAttemptDecision Decide(TimeSpan elapsed, bool waiting = false, bool previous = false,
+        bool overlap = false, bool empty = false, bool offers = false)
+        => MarketResultReadback.Decide(0, elapsed, offers, overlap,
+            MarketResultReadback.EmptyEvidence(0, 0, false, empty, waiting), previous);
+
+    [Fact]
+    public void LatePagesRepairBothQualitiesAndIgnoreRepeatedListings()
+    {
+        var repair = new LateOfferings();
+        var nq = new MarketOffer(10, "Rival", 1);
+        var hq = nq with { IsHQ = true };
+        Assert.NotNull(repair.Merge(3, [], 8)); // The first late page contained only our retainers.
+        Assert.NotNull(repair.Merge(4, [(1, nq)], 8));
+        Assert.Null(repair.Merge(4, [(1, nq)], 8));
+        Assert.False(repair.Accepts(5));
+        Assert.Null(repair.Merge(5, [(3, hq)], 8));
+        var scan = repair.Merge(4, [(1, nq), (2, hq)], 8)!;
+        Assert.Equal(nq, Assert.Single(scan.Competitors(false, true)));
+        Assert.Equal(hq, Assert.Single(scan.Competitors(true, true)));
+    }
+
+    [Fact]
+    public void MatchingPageCannotHideForeignStreamDuringAutoOpenedSearch()
+    {
+        var pages = new OfferingStream();
+        var start = DateTime.UtcNow;
+        pages.Observe(50971, start.AddMilliseconds(-599));
+        pages.Observe(50973, start.AddMilliseconds(100));
+        Assert.True(pages.Overlaps(50973, start));
+        Assert.False(pages.Overlaps(50973, start.AddSeconds(1)));
+        pages.Observe(50971, start.AddSeconds(2));
+        Assert.True(pages.Overlaps(50973, start));
     }
 
     [Theory]

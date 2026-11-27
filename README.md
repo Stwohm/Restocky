@@ -55,8 +55,9 @@ retainer list appears. You get updates from `/xlplugins` like any other plugin.
   least 1.5× cheaper than the next group.
 - **Floor:** a price never goes below the item's floor.
   - If you know the purchase cost, the floor is the break-even price after sales tax:
-    `cost × (1 + minimum profit %) ÷ (1 − sales tax %)`, rounded up. This uses the next lot to be
-    sold (first in, first out).
+    `cost × (1 + minimum profit %) ÷ (1 − sales tax %)`, rounded up. Cost is the total remaining lot cost divided by held units of the same
+    quality, including listings, retainer inventories, bags and saddlebags. Partial scans use the
+    listed and otherwise known units as a lower bound. Sales still consume bought lots first in FIFO order.
   - A floor you type in **Settings** replaces the break-even floor, even when it is lower. Press
     **Auto** (or type 0) to return to the break-even floor.
 - **Max drop / max raise:** an automatic cycle does not apply a change bigger than 30% (configurable).
@@ -80,7 +81,16 @@ retainer list appears. You get updates from `/xlplugins` like any other plugin.
 
 - Sales are read from each retainer's sale history during a cycle (buyer, time and exact proceeds).
 - Market board purchases are recorded as cost lots automatically. You can also add lots by hand in the
-  **Costs** tab.
+  **Costs** tab. A sale consumes available lots of the same item and quality first, oldest purchase first.
+  **Profit** is the net proceeds on covered units minus their recorded cost. The remaining units have
+  zero purchase cost and their net proceeds appear under **Earning**. Once the last lot is consumed,
+  the automatic cost floor disappears. Flip, Gather and Craft are manual stock tracking tags.
+- Reprice estimates share the remaining lots across listings in retainer-key and listing-slot order.
+  Sorting, filtering or collapsing the table keeps that allocation stable. Actual sales use the
+  order in which sales are recorded and only consume lots acquired by the sale time.
+- In **Sales**, choose **Today**, **3 days** or **7 days** for unmatched market sales. The range uses
+  local calendar dates and the latest market history received this session for each scanned item
+  (about 20 sales per item). Busy items can therefore cover only part of the selected period.
 - **Profit** column, realized profit, **Stuck** listings and sales **Velocity** in the Sales tab.
 - A tooltip on each listing shows cheaper sellers and how often each rival undercut you in the last
   24 h, 3 days and 1 week.

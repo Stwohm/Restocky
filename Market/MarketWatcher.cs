@@ -38,7 +38,7 @@ public sealed unsafe class MarketWatcher : IDisposable
     internal event Action<uint, MarketScan, bool>? OffersUpdated;
 
     /// <summary>同じ検索結果が複数回飛んでくる server エラー時の保護。</summary>
-    private int lastRequestId = -1;
+    private (uint Item, int Request)? lastPage;
 
     /// <summary>Executor が自動 fetch している間にセットされる「期待アイテム」。
     /// これと違う itemId の OfferingsReceived は server からの遅延着信扱いで cache 更新しない。
@@ -59,8 +59,25 @@ public sealed unsafe class MarketWatcher : IDisposable
         Interlocked.Increment(ref requestGeneration);
     }
 
-    internal bool RecordEmptySearch(uint itemId)
-        => RecordSearchListings(itemId, []);
+    private readonly Dictionary<uint, LateOfferings> emptyThisVisit = new();
+    private int visitGeneration;
+    internal event Action<uint, MarketScan>? EmptyResultReplaced;
+    internal OfferingStream Stream { get; } = new();
+
+    internal void EndVisit()
+    {
+        emptyThisVisit.Clear();
+        Interlocked.Increment(ref visitGeneration);
+    }
+
+    internal bool RecordEmptySearch(uint itemId, DateTime evidenceStart, DateTime comparisonStart)
+    {
+        // The network thread can observe a matching page before the framework thread publishes it.
+        if (Stream.LastPageFor(itemId) >= comparisonStart || Stream.Overlaps(itemId, evidenceStart)
+            || !RecordSearchListings(itemId, [])) return false;
+        emptyThisVisit[itemId] = new LateOfferings();
+        return true;
+    }
 
     internal bool RecordSearchListings(uint itemId, ReadOnlySpan<MarketBoardListing> listings)
     {
@@ -80,7 +97,12 @@ public sealed unsafe class MarketWatcher : IDisposable
             var offer = new MarketOffer(listing.UnitPrice, $"#{listing.RetainerId:X}", (int)listing.Quantity);
             (listing.IsHqItem ? hq : nq).Add(offer);
         }
-        PublishOffers(itemId, new MarketScan(nq, hq) { WorldId = HomeWorldId });
+        if (listings.Length > 0)
+        {
+            if (nq.Count == 0 && hq.Count == 0) emptyThisVisit[itemId] = new LateOfferings();
+            else emptyThisVisit.Remove(itemId);
+        }
+        PublishOffers(itemId, new MarketScan(nq, hq) { WorldId = HomeWorldId }, true);
         return true;
     }
 
@@ -98,21 +120,6 @@ public sealed unsafe class MarketWatcher : IDisposable
         disposed = true;
         marketBoard.OfferingsReceived -= OnOfferingsReceived;
         marketBoard.HistoryReceived -= OnHistoryReceived;
-    }
-
-    internal DateTime LastOfferingsUtc => new(Interlocked.Read(ref lastOfferingsTicks), DateTimeKind.Utc);
-    private long lastOfferingsTicks;
-
-    internal bool HasHistoryAfter(uint itemId, DateTime since)
-        => saleHistory.TryGetValue((HomeWorldId, itemId), out var scan) && scan.ScannedUtc > since;
-
-    private void OnFramework(Action record)
-    {
-        var generation = Volatile.Read(ref requestGeneration);
-        _ = Plugin.Framework.RunOnFrameworkThread(() =>
-        {
-            if (!disposed && generation == Volatile.Read(ref requestGeneration)) record();
-        });
     }
 
     private void OnHistoryReceived(IMarketBoardHistory history)
@@ -135,8 +142,15 @@ public sealed unsafe class MarketWatcher : IDisposable
     {
         if (disposed || offerings.ItemListings.Count == 0) return;
         // API 15 discards the two page-index bytes. Track arrival even for ignored packets.
-        Interlocked.Exchange(ref lastOfferingsTicks, DateTime.UtcNow.Ticks);
-        OnFramework(() => RecordOffers(offerings));
+        var item = offerings.ItemListings[0].ItemId;
+        var visit = Volatile.Read(ref visitGeneration);
+        var generation = Volatile.Read(ref requestGeneration);
+        Stream.Observe(item, DateTime.UtcNow);
+        _ = Plugin.Framework.RunOnFrameworkThread(() =>
+        {
+            if (disposed || visit != visitGeneration) return;
+            if (generation == requestGeneration || (emptyThisVisit.TryGetValue(item, out var repair) && repair.Accepts(offerings.RequestId))) RecordOffers(offerings);
+        });
     }
 
     private void RecordOffers(IMarketBoardCurrentOfferings offerings)
@@ -144,7 +158,7 @@ public sealed unsafe class MarketWatcher : IDisposable
         try
         {
             // An empty packet has no item identity. The executor checks the search addon instead.
-            if (offerings.ItemListings.Count == 0 || offerings.RequestId == lastRequestId) return;
+            if (offerings.ItemListings.Count == 0) return;
             var itemId = offerings.ItemListings[0].ItemId;
             var player = objectTable.LocalPlayer;
             if (!MarketWorldGate.Accept(player?.CurrentWorld.RowId ?? 0, player?.HomeWorld.RowId ?? 0))
@@ -153,17 +167,20 @@ public sealed unsafe class MarketWatcher : IDisposable
                 return;
             }
 
-            if (itemId == 0) return;
+            emptyThisVisit.TryGetValue(itemId, out var repair);
+            var late = repair?.Accepts(offerings.RequestId) == true;
+            if (itemId == 0 || (!late && lastPage == (itemId, offerings.RequestId))) return;
 
             // 自動 fetch 中は「期待アイテム」と一致するものだけ採用する。
             // server が古いリクエストの応答を遅延配送してくると、現在 fetch 中の
             // listing と違うアイテムの結果が「最新の cache」になってしまうため。
-            if (expectedItemId.HasValue && (expectedItemId.Value == 0 || itemId != expectedItemId.Value))
+            if (!late && expectedItemId.HasValue && itemId != expectedItemId.Value)
             {
                 log.Information($"[Restocker] OfferingsReceived for item={itemId} ignored (expected {expectedItemId.Value})");
                 return;
             }
-            lastRequestId = offerings.RequestId;
+            if (!late) emptyThisVisit.Remove(itemId);
+            lastPage = (itemId, offerings.RequestId);
 
             // デバッグ用に受信 listing をすべてログに出す。OWN マークは自リテイナーで
             // スキップされた listing。各行: HQ/NQ, price, retainerId。
@@ -174,6 +191,7 @@ public sealed unsafe class MarketWatcher : IDisposable
             // LowestPriceResolver can actually drop bait listings. Upstream kept only the first.
             var nqPrices = new System.Collections.Generic.List<MarketOffer>();
             var hqPrices = new System.Collections.Generic.List<MarketOffer>();
+            var latePage = late ? new List<(ulong Id, MarketOffer Offer)>() : null;
             for (var idx = 0; idx < offerings.ItemListings.Count; idx++)
             {
                 var listing = offerings.ItemListings[idx];
@@ -187,16 +205,27 @@ public sealed unsafe class MarketWatcher : IDisposable
                 if (isOwn) continue;
                 if (price <= 0) continue;
                 var offer = new MarketOffer(price, listing.RetainerName ?? string.Empty, (int)listing.ItemQuantity);
-                if (listing.IsHq) hqPrices.Add(offer);
+                if (latePage != null) latePage.Add((listing.ListingId, offer with { IsHQ = listing.IsHq }));
+                else if (listing.IsHq) hqPrices.Add(offer);
                 else nqPrices.Add(offer);
             }
 
             // Both flags are always written (possibly empty) so "no HQ competitor" is a known
             // answer, not a timeout.
-            var scan = new MarketScan(nqPrices, hqPrices) { WorldId = HomeWorldId };
-            PublishOffers(itemId, scan);
+            var firstLatePage = late && !repair!.HasPages;
+            var scan = late ? repair!.Merge(offerings.RequestId, latePage!, HomeWorldId)
+                : new MarketScan(nqPrices, hqPrices) { WorldId = HomeWorldId };
+            if (scan == null) return;
+            if (!late && expectedItemId == itemId && nqPrices.Count == 0 && hqPrices.Count == 0)
+                emptyThisVisit[itemId] = new LateOfferings();
+            PublishOffers(itemId, scan, late || expectedItemId == itemId);
+            if (late)
+            {
+                if (firstLatePage) log.Information($"[Restocker] late offerings for item={itemId} replaced empty result");
+                EmptyResultReplaced?.Invoke(itemId, scan);
+            }
 
-            dump.Append($"\n  → nq={nqPrices.Count} (lowest {Cache.GetLowest(itemId, false, true):N0})  hq={hqPrices.Count} (lowest {Cache.GetLowest(itemId, true, true):N0})");
+            dump.Append($"\n  → nq={scan.Competitors(false, true).Count} (lowest {Cache.GetLowest(itemId, false, true):N0})  hq={scan.Competitors(true, true).Count} (lowest {Cache.GetLowest(itemId, true, true):N0})");
             log.Information(dump.ToString());
         }
         catch (Exception ex)
@@ -205,18 +234,18 @@ public sealed unsafe class MarketWatcher : IDisposable
         }
     }
 
-    private void PublishOffers(uint itemId, MarketScan scan)
+    private void PublishOffers(uint itemId, MarketScan scan, bool requested)
     {
         Cache.Replace(itemId, scan);
         try
         {
-            if (expectedItemId.HasValue) CompetitorsObserved?.Invoke(itemId, scan);
+            if (requested) CompetitorsObserved?.Invoke(itemId, scan);
         }
         catch (Exception ex) { log.Error(ex, "[Restocker] CompetitorsObserved handler threw"); }
 
         try
         {
-            OffersUpdated?.Invoke(itemId, scan, expectedItemId.HasValue);
+            OffersUpdated?.Invoke(itemId, scan, requested);
         }
         catch (Exception ex) { log.Error(ex, "[Restocker] market offers handler threw"); }
     }

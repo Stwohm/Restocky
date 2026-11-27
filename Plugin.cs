@@ -92,6 +92,7 @@ public sealed class Plugin : IDalamudPlugin
             Tracker.Tracker.ObserveCompetitors(item, true, scan.Competitors(true, Configuration.MatchQuality.For(item, true)), now, retainers);
         };
         Executor = new Executor(Framework, Log, Configuration, Costs.Ledger, MarketWatcher.Cache);
+        MarketWatcher.EmptyResultReplaced += Executor.OnEmptyResultReplaced;
         ChatGui.AddChatLinkHandler(MatchNqPrice, OnMatchPrice);
         ChatGui.AddChatLinkHandler(MatchHqPrice, OnMatchPrice);
         Executor.History = new PriceHistoryLog(

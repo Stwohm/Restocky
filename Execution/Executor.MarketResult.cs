@@ -4,13 +4,15 @@ using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 using Restocker.Common;
+using Restocker.Market;
 
 namespace Restocker.Execution;
 
 public sealed unsafe partial class Executor
 {
-    private bool TryReadMarketResult(AddonItemSearchResult* result, TimeSpan elapsed)
+    private bool TryReadMarketResult(AddonItemSearchResult* result, TimeSpan elapsed, out EmptyBoardEvidence evidence)
     {
+        evidence = EmptyBoardEvidence.None;
         if (result == null || !result->IsReady || result->Results == null || Plugin.Instance == null) return false;
         var agent = AgentItemSearch.Instance();
         var search = agent != null ? agent->InfoProxyItemSearch : null;
@@ -22,14 +24,12 @@ public sealed unsafe partial class Executor
         var proxyMatches = search != null && search->SearchItemId == fetchItemId;
         uint? proxyOffers = proxyMatches ? search->ListingCount : null;
         var watcher = Plugin.Instance.MarketWatcher;
-        if (rows == 0 && MarketResultReadback.EmptyItemMatches(fetchItemId, titleItem, agent != null ? agent->ResultItemId : 0, title)
-            && MarketResultReadback.IsEmpty(rows, proxyOffers, search != null && search->WaitingForListings,
-                elapsed >= MarketResultReadback.MessageSettle && HasMarketMessage(result, AddonText.NoMarketResults), HasMarketMessage(result, AddonText.MarketSearchWaiting),
-                watcher.HasHistoryAfter(fetchItemId, searchRowStartUtc), elapsed)
-            && watcher.RecordEmptySearch(fetchItemId))
+        if (rows == 0 && MarketResultReadback.EmptyItemMatches(fetchItemId, titleItem, agent != null ? agent->ResultItemId : 0, title))
         {
-            LogMarketResult(result, "confirmed empty");
-            return true;
+            evidence = MarketResultReadback.EmptyEvidence(rows, proxyOffers, search != null && search->WaitingForListings,
+                HasMarketMessage(result, AddonText.NoMarketResults) || NodeShows(result->HitsMessage, "0 hits"),
+                HasMarketMessage(result, AddonText.MarketSearchWaiting));
+            return false;
         }
 
         // Give OfferingsReceived priority. The addon and proxy must agree before using live

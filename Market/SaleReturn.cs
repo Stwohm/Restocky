@@ -2,9 +2,9 @@ namespace Restocker.Market;
 
 internal readonly record struct SaleReturn(decimal? Profit, decimal? Earning)
 {
-    internal static SaleReturn Estimate(long unitPrice, decimal taxRate, decimal? unitCost, int quantity)
+    internal static SaleReturn Estimate(long unitPrice, decimal taxRate, (decimal Cost, int Uncovered) allocation, int quantity)
         => unitPrice > 0 && quantity > 0
-            ? Calculate(unitPrice * (1m - taxRate) * quantity, unitCost * quantity, quantity, unitCost.HasValue ? 0 : quantity)
+            ? Calculate(unitPrice * (1m - taxRate) * quantity, allocation.Cost, quantity, allocation.Uncovered)
             : default;
 
     internal static SaleReturn Realized(ListingRecord sale)

@@ -7,6 +7,22 @@ public sealed class DailyMarketSalesTests
     private static readonly DateTime Noon = new(2026, 11, 23, 12, 0, 0, DateTimeKind.Utc);
     private static readonly MarketSale Sale = new(8, true, 2, 100, Noon);
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(3)]
+    [InlineData(7)]
+    public void IncludesFirstLocalDayThroughToday(int days)
+    {
+        var first = Noon.Date.AddDays(1 - days);
+        var rows = new[] { Sale, Sale with { SoldUtc = first.AddTicks(-1) }, Sale with { SoldUtc = first },
+            Sale with { SoldUtc = Noon.Date.AddDays(1) } };
+        var daily = DailyMarketSales.Calculate(rows, [Own(first)], Noon, TimeZoneInfo.Utc, days);
+        Assert.Equal(2, daily.Total);
+        Assert.Equal(1, daily.Matched);
+        Assert.Equal(1, daily.RecordedOurs);
+        Assert.Equal(Sale, Assert.Single(daily.Lost));
+    }
+
     [Fact]
     public void Identical_sale_to_a_different_known_buyer_is_lost()
     {

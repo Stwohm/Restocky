@@ -12,16 +12,19 @@ internal sealed record DailyMarketSales(int Total, int Matched, int RecordedOurs
 {
     private static readonly TimeSpan MatchTolerance = TimeSpan.FromMinutes(5);
 
-    internal static bool IsOnDay(DateTime utc, DateTime day, TimeZoneInfo zone)
-        => TimeZoneInfo.ConvertTimeFromUtc(utc, zone).Date == day.Date;
+    internal static bool InPeriod(DateTime utc, DateTime day, TimeZoneInfo zone, int days)
+    {
+        var date = TimeZoneInfo.ConvertTimeFromUtc(utc, zone).Date;
+        return date >= day.Date.AddDays(1 - days) && date <= day.Date;
+    }
 
     internal static DailyMarketSales Calculate(IEnumerable<MarketSale> market, IEnumerable<ListingRecord> own,
-        DateTime day, TimeZoneInfo zone)
+        DateTime day, TimeZoneInfo zone, int days = 1)
     {
         var sales = market.ToArray();
-        var total = sales.Count(s => IsOnDay(s.SoldUtc, day, zone));
+        var total = sales.Count(s => InPeriod(s.SoldUtc, day, zone, days));
         var ownSales = own.Where(s => s.RecordedSaleUtc.HasValue).ToArray();
-        var recorded = ownSales.Count(s => IsOnDay(s.RecordedSaleUtc!.Value, day, zone));
+        var recorded = ownSales.Count(s => InPeriod(s.RecordedSaleUtc!.Value, day, zone, days));
         if (total == 0) return new DailyMarketSales(0, 0, recorded, []);
 
         var candidates = ownSales.ToLookup(s => (s.ItemId, s.IsHq, s.Quantity));
@@ -42,7 +45,7 @@ internal sealed record DailyMarketSales(int Total, int Matched, int RecordedOurs
                 ? TimeSpan.MaxValue : (eligible[i][0].RecordedSaleUtc!.Value - rows[i].SoldUtc).Duration());
             foreach (var i in closestFirst)
                 if (!TryMatch(i, eligible, matched, new HashSet<ListingRecord>())
-                    && IsOnDay(rows[i].SoldUtc, day, zone))
+                    && InPeriod(rows[i].SoldUtc, day, zone, days))
                     lost.Add(rows[i]);
         }
 

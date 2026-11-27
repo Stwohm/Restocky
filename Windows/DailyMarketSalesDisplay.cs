@@ -10,7 +10,24 @@ internal static class DailyMarketSalesDisplay
 {
     internal static void Draw(uint worldId, uint? itemId = null)
     {
+        int[] periods = [1, 3, 7];
+        var config = Plugin.Configuration;
+        var index = Math.Max(0, Array.IndexOf(periods, config.MarketSalesPeriodDays));
+        if (!itemId.HasValue)
+        {
+            string[] names = [Strings.Today, Strings.MarketThreeDays, Strings.MarketSevenDays];
+            ImGui.SetNextItemWidth(120);
+            if (ImGui.Combo(Strings.SalesPeriod + "###market-sales-period", ref index, names, names.Length))
+            {
+                config.MarketSalesPeriodDays = periods[index];
+                config.Save();
+            }
+        }
+        var days = periods[index];
         var today = DateTime.Today;
+        ImGui.TextDisabled(days == 1 ? today.ToString("d") : $"{today.AddDays(1 - days):d} – {today:d}");
+        if (itemId.HasValue) ImGui.TextWrapped(Strings.UnmatchedMarketSalesHint);
+        else if (ImGui.IsItemHovered()) ImGui.SetTooltip(Strings.UnmatchedMarketSalesHint);
         var zone = TimeZoneInfo.Local;
         var worldRetainers = Plugin.Configuration.Snapshots.Values.Where(s => s.WorldId == worldId)
             .Select(s => s.Key).ToHashSet(StringComparer.Ordinal);
@@ -23,8 +40,8 @@ internal static class DailyMarketSalesDisplay
              (worldId == homeWorldId && s.RetainerKey.StartsWith(ownCharacter, StringComparison.Ordinal))));
         var scans = market.SaleHistory.Where(s => s.Key.WorldId == worldId
             && (!itemId.HasValue || s.Key.ItemId == itemId)
-            && DailyMarketSales.IsOnDay(s.Value.ScannedUtc, today, zone)).Select(s => s.Value).ToArray();
-        var daily = DailyMarketSales.Calculate(scans.SelectMany(s => s.Sales), own, today, zone);
+            && DailyMarketSales.InPeriod(s.Value.ScannedUtc, today, zone, days)).Select(s => s.Value).ToArray();
+        var daily = DailyMarketSales.Calculate(scans.SelectMany(s => s.Sales), own, today, zone, days);
         if (scans.Length == 0)
         {
             ImGui.TextDisabled(string.Format(Strings.TodayOwnSales, daily.RecordedOurs));

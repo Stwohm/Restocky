@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Dalamud.Configuration;
 using Restocker.Data;
 using Restocker.Execution;
@@ -55,6 +56,7 @@ public sealed class Configuration : IPluginConfiguration
 
     public MatchQualitySettings MatchQuality { get; set; } = new();
 
+    public int MarketSalesPeriodDays { get; set; } = 1;
     public bool AutoCostFloor { get; set; } = true;
     public bool CostFloorOverrideMigrated { get; set; }
 
@@ -114,9 +116,36 @@ public sealed class Configuration : IPluginConfiguration
 
     public long FloorFor(uint itemId) => PriceFloors.TryGetValue(itemId, out var f) ? f : 0;
 
-    internal (long Price, bool FromCost) EffectiveFloorFor(uint itemId, bool hq, CostLedger ledger) =>
-        BreakEvenFloor.Resolve(FloorFor(itemId), AutoCostFloor ? ledger.CurrentUnitCost(itemId, hq) : null,
+    private readonly Dictionary<(uint, bool), long> loggedFloorLowerBounds = new();
+
+    internal (long Price, bool FromCost) EffectiveFloorFor(uint itemId, bool hq, CostLedger ledger,
+        string? liveRetainer = null, long liveListed = 0)
+    {
+        var manual = FloorFor(itemId);
+        if (manual > 0 || !AutoCostFloor || ledger.RemainingUnits(itemId, hq) == 0)
+            return (Math.Max(0, manual), false);
+
+        // Ledger lots span all tracked characters. A live retainer replaces its cached listings.
+        var (listed, available) = InventorySnapshot.HeldUnits(itemId, hq, Snapshots.Values, Characters.Values,
+            liveRetainer, liveListed);
+        var complete = Snapshots.Count > 0 && Characters.Count > 0
+            && (liveRetainer == null || Snapshots.ContainsKey(liveRetainer))
+            && Snapshots.Values.All(s => Characters.ContainsKey(CharacterSnapshot.MakeKey(s.CharacterContentId))
+                && RetainerWatcher.RetainerInventoryFreshness(s) != DateTime.MinValue)
+            && Characters.Values.All(c => RetainerWatcher.CharacterInventoryFreshness(c, false) != DateTime.MinValue
+                && RetainerWatcher.CharacterInventoryFreshness(c, true) != DateTime.MinValue);
+
+        var held = listed + available;
+        var item = (itemId, hq);
+        if (complete) loggedFloorLowerBounds.Remove(item);
+        else if (!loggedFloorLowerBounds.TryGetValue(item, out var previous) || previous != held)
+        {
+            loggedFloorLowerBounds[item] = held;
+            Plugin.Log.Debug($"[Restocker] cost floor item={itemId} hq={hq}: total stock unknown, using listed={listed} plus known inventory={available} as a lower bound (at least the remaining lot quantity).");
+        }
+        return BreakEvenFloor.Resolve(0, ledger.WeightedAverageCost(itemId, hq, held),
             (decimal)SaleTaxPercent, (decimal)MinProfitPercent);
+    }
 
     public bool IsHeld(uint itemId, bool hq) => HeldItems.Contains(HeldKey(itemId, hq));
 
