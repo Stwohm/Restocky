@@ -13,5 +13,5 @@
     "list"
   ],
   "RepoUrl": "https://github.com/Stwohm/Restocky",
-  "Changelog": "0.3.17.1 — Retainer board: assign items by clicking slots. Click an empty slot to pick a Stock tracking item (searchable, by category) and set units per listing; click more slots for more listings of the same item (e.g. Fire Crystal 2 × 2000). Click a planned slot to change or remove it; click an unplanned listing to plan that slot for it. The Add item button and plan list are gone; slots stay where you put them."
+  "Changelog": "0.3.17.2 — Retainer board readability: colour-coded text instead of cell backgrounds, with a legend (green Filled, grey Reserved, red Blocking, orange price = undercut, amber age = stuck, grey ! = stale, blue Hold). Fixed columns, right-aligned prices, cards wrap to the window. Stock tracking marks board-planned Restock to values with 'board' and explains where they come from. QA fixes: pinned board positions stay stable, Fill to plan prefers a full lot, crystal withdraw respects Keep room, bulk listing no longer reuses slots from earlier rows, renamed retainers show the current name."
 }

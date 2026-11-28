@@ -137,13 +137,7 @@ public sealed class LowStockService : IDisposable
         {
             var retainer = manager->GetRetainerBySortedIndex(i);
             if (retainer == null || retainer->RetainerId == 0) continue;
-            var key = RetainerSnapshot.MakeKey(cid, retainer->RetainerId);
-            retainers.Add(configuration.Snapshots.GetValueOrDefault(key) ?? new RetainerSnapshot
-            {
-                Key = key,
-                CharacterContentId = cid,
-                RetainerName = retainer->NameString,
-            });
+            retainers.Add(RetainerSnapshot.ForRoster(configuration.Snapshots, cid, retainer->RetainerId, retainer->NameString));
         }
         return retainers.ToArray();
     }

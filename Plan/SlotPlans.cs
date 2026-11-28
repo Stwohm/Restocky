@@ -21,6 +21,20 @@ public sealed class SlotPlans : Dictionary<string, List<SlotPlanRow>>
     internal int Target(ulong cid, uint id, bool hq) => ForCharacter(cid).Where(r => r.Matches(id, hq))
         .Sum(r => r.Slots * r.PerListing);
 
+    internal string TargetHint(ulong cid, LowStockEntry entry, IReadOnlyList<RetainerSnapshot> roster)
+    {
+        var parts = from pair in this
+                    where pair.Key.StartsWith($"{cid:X}.", StringComparison.Ordinal)
+                    from row in pair.Value
+                    where row.Matches(entry.ItemId, entry.IsHq)
+                    let name = roster.FirstOrDefault(r => r.Key == pair.Key)?.RetainerName ?? "unavailable retainer"
+                    select $"{row.Slots} {(row.Slots == 1 ? "slot" : "slots")} × {row.PerListing:N0} on {name}";
+        var hint = "From Retainer board: " + string.Join(" + ", parts);
+        if (entry.Target != Target(cid, entry.ItemId, entry.IsHq))
+            hint += $"\nStock tracking value {entry.Target:N0} is not used while the item is planned.";
+        return hint;
+    }
+
     internal bool TrySave(string key, List<SlotPlanRow> rows, out string? reason)
     {
         reason = rows.Any(r => r.ItemId == 0 || r.Slots < 1 || r.PerListing < 1
@@ -97,6 +111,7 @@ internal sealed class SlotLayout
         foreach (var row in rows)
         {
             var matches = Slots.Where(s => s.Plan == null && s.Listing is { } l && row.Matches(l.ItemId, l.IsHQ))
+                .OrderByDescending(s => row.Positions?.Contains(s.Index) == true)
                 .Take(row.Slots).ToArray();
             foreach (var slot in matches) Slots[slot.Index] = slot with { Plan = row };
             missing.AddRange(Enumerable.Repeat(row, row.Slots - matches.Length));

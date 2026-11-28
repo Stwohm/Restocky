@@ -13,6 +13,7 @@ public sealed record RestockSource(string SourceKey, string? FixedTargetKey, int
 {
     internal int MaxPerListing { get; init; } = int.MaxValue;
     internal int Reserved { get; init; }
+    internal int CrystalWithdrawalRoom { get; init; } = InventoryEntry.CrystalCapacity;
 }
 
 /// <summary>A low-stock watch entry (persisted in Configuration).</summary>
@@ -108,6 +109,8 @@ public static class RestockPlanner
         var preferredSnapshot = retainers?.FirstOrDefault(r => r.Key == firstChoice);
         var fullSnapshot = preferredSnapshot?.Listings.Count >= Planner.MaxListingSlots ? preferredSnapshot : null;
         var remaining = sources.Select(s => s.Available).ToArray();
+        var unsoldBag = InventoryEntry.IsCrystal(itemId)
+            ? sources.Where(s => s.SourceKey.EndsWith(".bag")).Sum(s => s.Available) : 0;
 
         // Preferred retainers (the ones that already sell this item) list first:
         //   0 their own inventory, 1 bag -> them, 2 saddlebag -> them,
@@ -121,7 +124,16 @@ public static class RestockPlanner
 
         bool HasRoom(string key) => free.TryGetValue(key, out var n) && n > 0;
 
-        void AddListings(int index, string? forcedTarget)
+        int LotSize(int index, string target)
+        {
+            var src = sources[index];
+            var limit = Math.Min(src.MaxPerListing, InventoryEntry.ListingLimit(itemId, int.MaxValue));
+            if (InventoryEntry.IsCrystal(itemId) && src.FixedTargetKey != null && src.FixedTargetKey != target)
+                limit = Math.Min(limit, src.CrystalWithdrawalRoom - unsoldBag);
+            return Math.Min(Math.Min(perListing, limit), Math.Min(need, remaining[index]));
+        }
+
+        void AddListings(int index, string? forcedTarget, bool oneLot = false)
         {
             var src = sources[index];
             while (need > 0 && remaining[index] > 0)
@@ -131,7 +143,8 @@ public static class RestockPlanner
                     ?? free.Where(p => p.Value > 0).OrderByDescending(p => p.Value).Select(p => p.Key).FirstOrDefault();
                 if (target == null || !HasRoom(target)) break;
 
-                var qty = Math.Min(Math.Min(perListing, src.MaxPerListing), Math.Min(need, remaining[index]));
+                var qty = LotSize(index, target);
+                if (qty <= 0) break;
                 result.Add(new PlannedAction
                 {
                     Kind = PlannedActionKind.NewListing,
@@ -148,6 +161,8 @@ public static class RestockPlanner
                 free[target]--;
                 need -= qty;
                 remaining[index] -= qty;
+                if (InventoryEntry.IsCrystal(itemId) && src.SourceKey.EndsWith(".bag")) unsoldBag -= qty;
+                if (oneLot) break;
             }
         }
 
@@ -183,9 +198,15 @@ public static class RestockPlanner
                     if (source.SourceKey.EndsWith(".bag")) return 2;
                     return 3;
                 }
-                foreach (var i in indices.Where(i => sources[i].FixedTargetKey == seller.Key
-                    || sources[i].FixedTargetKey == null || crystal).OrderBy(SourceOrder))
-                    AddListings(i, seller.Key);
+                var eligible = indices.Where(i => sources[i].FixedTargetKey == seller.Key
+                    || sources[i].FixedTargetKey == null || crystal).ToArray();
+                while (need > 0 && HasRoom(seller.Key))
+                {
+                    var next = eligible.Where(i => LotSize(i, seller.Key) > 0)
+                        .OrderByDescending(i => LotSize(i, seller.Key)).ThenBy(SourceOrder).FirstOrDefault(-1);
+                    if (next < 0) break;
+                    AddListings(next, seller.Key, oneLot: true);
+                }
             }
             free = overflow;
             if (assignment != null) perListing = assignment.PerListing;

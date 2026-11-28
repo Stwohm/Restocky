@@ -177,11 +177,6 @@ public static class Planner
         long price, int maxStack, int slots, int quantity, int keep, IReadOnlyList<PlannedAction> earlier)
     {
         var fixedSource = sourceKey == selected.Key;
-        if (!plans.ForCharacter(selected.CharacterContentId).Any())
-            return fixedSource ? PlanNewListings([selected], item, hq, price, maxStack, listingsCap: slots, perListingQty: quantity)
-                : character == null ? [] : PlanCharacterSource(character, sourceKey, selected, item, hq, price, maxStack,
-                    slots, quantity, keep, earlier);
-
         var result = new List<PlannedAction>();
         var previous = earlier.Where(a => a.Kind == PlannedActionKind.NewListing && a.ItemId == item && a.IsHQ == hq).ToList();
         var saddle = character?.Saddlebag.Concat(character.PremiumSaddlebag) ?? [];
@@ -197,7 +192,9 @@ public static class Planner
             budget = InventoryReserve.Available(held, keep) - previous.Where(a => a.SourceKey.StartsWith(prefix)).Sum(a => a.Quantity);
         }
         var transferable = !fixedSource || InventoryEntry.IsCrystal(item);
-        var candidates = roster.Where(r => r.LastRefreshedUtc != DateTime.MinValue && (transferable || r.Key == selected.Key))
+        var hasPlans = plans.ForCharacter(selected.CharacterContentId).Any();
+        var candidates = roster.Where(r => (!hasPlans || r.LastRefreshedUtc != DateTime.MinValue)
+            && (transferable || r.Key == selected.Key))
             .Select(r => (Seller: r, Layout: plans.Layout(r, earlier))).ToList();
         foreach (var (seller, layout) in candidates) Add(seller, layout.ReservedFor(item, hq));
         var assigned = plans.Target(selected.CharacterContentId, item, hq) > 0;
@@ -210,8 +207,14 @@ public static class Planner
         {
             var count = Math.Min(capacity, slots - result.Count);
             if (count <= 0) return;
-            var actions = PlanFromInventoryList(inventory, sourceKey, seller, item, hq, price, maxStack,
-                count, quantity, consumed, budget, stockRestock: fixedSource && seller.Key != selected.Key);
+            var withdrawal = fixedSource && seller.Key != selected.Key;
+            if (withdrawal && character != null)
+            {
+                var held = character.Bag.Where(i => i.ItemId == item && i.IsHQ == hq).Sum(i => i.Quantity);
+                if (InventoryEntry.CrystalCapacity - held < Math.Min(quantity, maxStack)) return;
+            }
+            var actions = PlanFromInventoryList(inventory.Where(i => i.IsListable), sourceKey, seller, item, hq, price, maxStack,
+                count, quantity, consumed, budget, stockRestock: withdrawal);
             var units = actions.Sum(a => a.Quantity);
             consumed += units;
             budget -= units;

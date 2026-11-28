@@ -204,9 +204,9 @@ public sealed partial class LowStockTab
         if (!ImGui.BeginTable("##stock-items", 5, flags)) return;
         var em = ImGui.GetFontSize();
         ImGui.TableSetupScrollFreeze(0, 1);
-        ImGui.TableSetupColumn(Strings.StockItem, ImGuiTableColumnFlags.WidthFixed, Math.Max(14 * em, availableWidth - 37 * em));
+        ImGui.TableSetupColumn(Strings.StockItem, ImGuiTableColumnFlags.WidthFixed, Math.Max(14 * em, availableWidth - 40 * em));
         ImGui.TableSetupColumn(Strings.StockCounts, ImGuiTableColumnFlags.WidthFixed, 9 * em);
-        ImGui.TableSetupColumn($"{Strings.StockThreshold} / {Strings.StockTarget}", ImGuiTableColumnFlags.WidthFixed, 9 * em);
+        ImGui.TableSetupColumn($"{Strings.StockThreshold} / {Strings.StockTarget}", ImGuiTableColumnFlags.WidthFixed, 12 * em);
         ImGui.TableSetupColumn("Mode", ImGuiTableColumnFlags.WidthFixed, 4 * em);
         ImGui.TableSetupColumn("Actions", ImGuiTableColumnFlags.WidthFixed, 11 * em);
         ImGui.TableHeadersRow();
@@ -323,11 +323,13 @@ public sealed partial class LowStockTab
                 ImGui.EndTooltip();
             }
             ImGui.TableNextColumn();
-            RightAligned($"{e.Threshold:N0} / {to:N0}");
+            RightAligned($"{e.Threshold:N0} / {to:N0}" + (plannedTarget > 0 ? "  board" : ""));
             if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
             {
                 var velocity = SalesVelocity.Calculate(Plugin.Instance.Tracker.Tracker.GetSales(e.ItemId, e.IsHq), now);
-                ImGui.SetTooltip(string.Format(Strings.SuggestedThreshold, velocity.SuggestedThreshold));
+                var hint = string.Format(Strings.SuggestedThreshold, velocity.SuggestedThreshold);
+                if (plannedTarget > 0) hint = configuration.SlotPlans.TargetHint(cid, e, retainers) + "\n" + hint;
+                ImGui.SetTooltip(hint);
             }
             ImGui.TableNextColumn();
             ImGui.TextUnformatted(Strings.StockRestockModeName(e.EffectiveRestockMode));
@@ -411,7 +413,7 @@ public sealed partial class LowStockTab
         if (ImGui.InputInt(Strings.StockTarget, ref to, 0)) { e.Target = Math.Max(0, to); configuration.Save(); }
         ImGui.EndDisabled();
         if (plannedTarget > 0 && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-            ImGui.SetTooltip("Sum of planned slots × units per listing across your retainers.");
+            ImGui.SetTooltip(configuration.SlotPlans.TargetHint(cid, e, service.CurrentRetainers()));
         ListTab.DrawKeep(configuration, e.ItemId, e.IsHq, "Keep in inventory");
         var per = e.PerListing;
         ImGui.BeginDisabled(plannedTarget > 0);

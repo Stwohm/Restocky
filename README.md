@@ -77,6 +77,27 @@ retainer list appears. You get updates from `/xlplugins` like any other plugin.
   sells the item and is used as a fallback when the chosen retainer cannot take a listing.
 - Add **Flip**, **Gather**, or **Craft** and **Regular** or **Trial** tags to filter the list.
 
+#### Retainer board
+
+Each row is one board position. Click a row to edit its reservation. A matching listing can
+move to a different game slot and still fill the same board position. Hover anywhere on the
+row for the full item name, the meaning of its colours and the last known listing details.
+
+| Board cue | Meaning |
+| --- | --- |
+| Green **Filled** | A listing of the planned item and quality occupies the reservation. |
+| Grey **Reserved** | The slot is empty. Qty shows the planned lot size. |
+| **Unplanned** / red **Blocking** | An extra listing occupies a slot. Blocking means it takes space needed by the plan. |
+| Faint **—** / **?** | The slot is free, or its market snapshot has never been read. |
+| Orange unit price | A cheaper offer appeared in the last scan. |
+| Amber age | The listing has reached the configured Stuck threshold. |
+| Grey **!** / grey listing name | The snapshot is stale or provisional. A dimmed listing name means Stock tracking is paused. |
+| Blue **Hold** | Automatic cycles and Fill to plan skip the item. |
+
+For each item and quality, **Restock to** totals slots × units per listing across this character’s
+board. Hover the **board** marker in Stock tracking for the breakdown by retainer. Removing
+the last reservation restores the saved target, lot size and Sell on preference.
+
 ### Sales, costs and profit
 
 - Sales are read from each retainer's sale history during a cycle (buyer, time and exact proceeds).

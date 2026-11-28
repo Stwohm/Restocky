@@ -11,6 +11,105 @@ public sealed class SlotPlanTests
 {
     private const uint Item = 100;
     private const uint Other = 101;
+
+    [Fact]
+    public void Adding_a_duplicate_preserves_the_pinned_listing_until_it_sells()
+    {
+        var seller = Seller(1, "RetainerA");
+        var plans = new SlotPlans();
+        var pinned = new ListingEntry { ListingIndex = 9, ItemId = Item };
+        var extra = new ListingEntry { ListingIndex = 0, ItemId = Item };
+        seller.Listings.Add(pinned);
+        Assert.True(plans.TryEditSlot(seller, 9, new(Item, false, 1, 5), out _));
+        seller.Listings.Add(extra);
+        var cells = plans.Layout(seller).DisplaySlots();
+        Assert.Same(pinned, cells[9].Listing);
+        Assert.Same(extra, cells[0].Listing);
+        seller.Listings.Remove(pinned);
+        Assert.Same(extra, plans.Layout(seller).DisplaySlots()[9].Listing);
+        seller.Listings.Clear();
+        Assert.NotNull(plans.Layout(seller).DisplaySlots()[9].Plan);
+    }
+
+    [Fact]
+    public void Fill_prefers_complete_lots_across_stacks_and_respects_the_source_limit()
+    {
+        var seller = Seller(1, "RetainerA");
+        var plans = new SlotPlans { [seller.Key] = [new(Item, true, 2, 10)] };
+        var actions = RestockPlanner.Plan(Item, true, 20, 0, 1, 700,
+            [new(seller.Key, seller.Key, 1), new("char.1.bag", null, 30) { MaxPerListing = 8 }],
+            new Dictionary<string, int> { [seller.Key] = 20 }, retainers: [seller], plans: plans, fillOnly: true);
+        Assert.Equal(new[] { 8, 8 }, actions.Select(a => a.Quantity));
+        Assert.All(actions, a => Assert.Equal(700, a.UnitPrice));
+    }
+
+    [Theory]
+    [InlineData(9900, 99)]
+    [InlineData(9999, 0)]
+    public void Fill_withdraws_only_what_fits_above_Keep(int held, int room)
+    {
+        var a = Seller(1, "RetainerA");
+        var b = Seller(2, "RetainerB");
+        b.Inventory.Add(new() { ItemId = 8, Quantity = 9999, MaxStackPerListing = 9999 });
+        var character = new CharacterSnapshot { Bag = [new() { ItemId = 8, Quantity = held }] };
+        var plans = new SlotPlans { [a.Key] = [new(8, false, 1, 2000)] };
+        var actions = RestockPlanner.Plan(8, false, 2000, 0, 1, 10,
+            AutoRestockPlanner.Sources(8, false, [a,b], character, held),
+            new Dictionary<string, int> { [a.Key] = 20 }, retainers: [a,b], plans: plans, fillOnly: true);
+        Assert.Equal(room, actions.Sum(x => x.Quantity));
+        Assert.All(actions, x => Assert.True(x.NeedsCrystalWithdrawal));
+        Assert.DoesNotContain(Planner.PlanBulk(plans, [a,b], b, character, b.Key, 8, false, 10, 9999, 1, 2000,
+            held, []), x => x.NeedsCrystalWithdrawal);
+    }
+
+    [Fact]
+    public void Unplanned_bulk_batches_share_slots_and_listable_inventory()
+    {
+        var seller = Seller(1, "RetainerA", 18);
+        seller.Inventory.Add(new() { ItemId = Item, Quantity = 1 });
+        seller.Inventory.Add(new() { ItemId = Item, Quantity = 5, IsListable = false });
+        seller.Inventory.Add(new() { ItemId = Other, Quantity = 10 });
+        List<PlannedAction> Run(uint id, List<PlannedAction> previous) => Planner.PlanBulk(new(), [seller],
+            seller, null, seller.Key, id, false, 1, 99, 4, 1, 0, previous);
+        var first = Run(Item, []);
+        Assert.Single(first);
+        Assert.Empty(Run(Item, first));
+        Assert.Single(Run(Other, first));
+    }
+
+    [Fact]
+    public void Target_hint_uses_current_roster_names_and_the_saved_target_for_this_quality()
+    {
+        var a = Seller(1, "RetainerA");
+        var snapshots = new Dictionary<string, RetainerSnapshot> { [a.Key] = a };
+        var renamed = RetainerSnapshot.ForRoster(snapshots, 1, 1, "RetainerB");
+        var added = RetainerSnapshot.ForRoster(snapshots, 1, 2, "RetainerA");
+        Assert.Same(a, renamed);
+        Assert.Equal(DateTime.MinValue, added.LastRefreshedUtc);
+        var plans = new SlotPlans { [renamed.Key] = [new(8, false, 1, 2000), new(8, true, 1, 50)],
+            [added.Key] = [new(8, false, 2, 100)] };
+        var entry = new LowStockEntry { ItemId = 8, Target = 4000 };
+        var hint = plans.TargetHint(1, entry, [renamed, added]);
+        Assert.Equal($"From Retainer board: 1 slot × {2000:N0} on RetainerB + 2 slots × 100 on RetainerA\n"
+            + $"Stock tracking value {4000:N0} is not used while the item is planned.", hint);
+        entry.Target = 2200;
+        Assert.DoesNotContain("Stock tracking value", plans.TargetHint(1, entry, [renamed, added]));
+    }
+
+    [Fact]
+    public void Planned_cycle_skip_ignores_the_locked_manual_seller()
+    {
+        var a = Seller(1, "RetainerA", 20);
+        var b = Seller(2, "RetainerB", 20);
+        var entry = new LowStockEntry { ItemId = Item, PreferredRetainers = { [1] = "RetainerB" } };
+        a.Inventory.Add(new() { ItemId = Item, Quantity = 1 });
+        var plans = new SlotPlans { [a.Key] = [new(Item, false, 1, 1)] };
+        var result = Assert.Single(AutoRestockPlanner.Plan([entry], [a,b], null, new ListingTracker(),
+            (_,_) => false, (_,_) => 0, slotPlans: plans));
+        Assert.Equal(RestockSkipReason.NoSlot, result.SkipReason);
+        Assert.Equal(a.RetainerName, result.RetainerName);
+    }
+
     private static RetainerSnapshot Seller(int id, string name, int used = 0) => new()
     {
         Key = RetainerSnapshot.MakeKey(1, (ulong)id), RetainerName = name, CharacterContentId = 1,

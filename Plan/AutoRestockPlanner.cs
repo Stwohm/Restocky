@@ -38,8 +38,8 @@ internal static class AutoRestockPlanner
             var target = plannedTarget > 0 ? plannedTarget : entry.Target;
             if (listedUnits > entry.Threshold || listedUnits >= target) continue;
 
-            var sellOn = entry.PreferredRetainers.GetValueOrDefault(owner.CharacterContentId);
-            var preferences = tracker.PreferredRetainers(itemId, hq, keys);
+            var sellOn = plannedTarget > 0 ? null : entry.PreferredRetainers.GetValueOrDefault(owner.CharacterContentId);
+            var preferences = plannedTarget > 0 ? [] : tracker.PreferredRetainers(itemId, hq, keys);
             var preferred = retainers.FirstOrDefault(r => sellOn != null ? r.RetainerName == sellOn : r.Key == preferences.FirstOrDefault());
             var floor = floorFor(itemId, hq);
             var (price, kind, _) = existing.Any() ? RestockPricing.FromListings(existing, floor)
@@ -106,6 +106,10 @@ internal static class AutoRestockPlanner
         CharacterSnapshot? character, int keep = 0)
     {
         var sources = new List<RestockSource>();
+        // Keep can remove the entire bag stack from the sellable sources. Its protected
+        // units still occupy physical space during a cross-retainer withdrawal.
+        var protectedCrystals = InventoryEntry.IsCrystal(itemId) && character != null
+            ? Math.Min(keep, character.Bag.Where(i => i.ItemId == itemId && i.IsHQ == hq).Sum(i => i.Quantity)) : 0;
         foreach (var retainer in retainers)
             Add(retainer.Inventory, retainer.Key, retainer.Key);
         if (character != null)
@@ -122,7 +126,10 @@ internal static class AutoRestockPlanner
             foreach (var stack in inventory)
                 if (stack.IsListable && stack.ItemId == itemId && stack.IsHQ == hq && stack.Quantity > 0)
                     sources.Add(new RestockSource(sourceKey, fixedTarget, stack.Quantity)
-                        { MaxPerListing = Math.Max(1, stack.MaxStackPerListing) });
+                    {
+                        MaxPerListing = Math.Max(1, stack.MaxStackPerListing),
+                        CrystalWithdrawalRoom = InventoryEntry.CrystalCapacity - protectedCrystals,
+                    });
         }
     }
 }

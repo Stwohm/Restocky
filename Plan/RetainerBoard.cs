@@ -2,8 +2,21 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using Restocker.Data;
+using Restocker.Market;
 
 namespace Restocker.Plan;
+
+internal readonly record struct BoardListingHealth(long? UndercuttingPrice, int? DaysListed, bool Stuck, bool Stale)
+{
+    internal static BoardListingHealth Read(ListingEntry? listing, ListingRecord? record, ListingMarketScan? scan,
+        bool staleSnapshot, DateTime now, int threshold)
+    {
+        long? cheaper = listing != null && scan is { Offers.Count: > 0 } s && s.Offers[0].Price < listing.UnitPrice
+            ? s.Offers[0].Price : null;
+        return new(cheaper, record == null ? null : Math.Max(0, (now - record.FirstSeenUtc).Days),
+            record != null && ListingTracker.IsStuck(record, now, threshold), staleSnapshot || record?.MissingSinceUtc != null);
+    }
+}
 
 internal sealed record SlotAssignment(LowStockEntry Item, long Needed, int Used);
 internal sealed record RetainerSlotSummary(List<SlotAssignment> Items, int Used)

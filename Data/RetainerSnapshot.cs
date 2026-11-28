@@ -36,6 +36,16 @@ public sealed class RetainerSnapshot
     /// <summary>最終取得時刻（UTC）。UI 上の「N 日前」鮮度表示に使う。<see cref="DateTime.MinValue"/> なら未取得。</summary>
     public DateTime LastRefreshedUtc { get; set; } = DateTime.MinValue;
 
+    internal static RetainerSnapshot ForRoster(IReadOnlyDictionary<string, RetainerSnapshot> snapshots,
+        ulong characterId, ulong retainerId, string name)
+    {
+        var key = MakeKey(characterId, retainerId);
+        var snapshot = snapshots.GetValueOrDefault(key) ?? new RetainerSnapshot
+            { Key = key, CharacterContentId = characterId, RetainerId = retainerId };
+        snapshot.RetainerName = name;
+        return snapshot;
+    }
+
     internal bool TryUpdateListingPrice(int slot, uint itemId, bool isHq, long unitPrice)
     {
         var listing = Listings.Find(l => l.ListingIndex == slot && l.ItemId == itemId && l.IsHQ == isHq);

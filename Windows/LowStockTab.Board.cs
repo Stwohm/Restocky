@@ -31,7 +31,8 @@ public sealed partial class LowStockTab
         boardCharacter = cid;
         nextBoardRefresh = now.AddSeconds(1);
         boardRoster = service.CurrentRetainers();
-        boardRecords = Plugin.Instance.Tracker.Tracker.ActiveListings.ToLookup(r => (r.RetainerKey, r.Slot, r.ItemId, r.IsHq));
+        boardRecords = Plugin.Instance.Tracker.Tracker.ActiveListings.OrderBy(r => r.MissingSinceUtc != null)
+            .ToLookup(r => (r.RetainerKey, r.Slot, r.ItemId, r.IsHq));
         boardSettings = configuration.LowStock.DistinctBy(e => (e.ItemId, e.IsHq)).ToDictionary(e => (e.ItemId, e.IsHq));
         pickerStock.Clear();
         boardAssignments = boardRoster.ToDictionary(s => s.Key, s => configuration.SlotPlans.Layout(s));
@@ -52,15 +53,17 @@ public sealed partial class LowStockTab
         ImGui.TextWrapped($"Missing {known.Sum(s => s.Missing)} · Unplanned {known.Sum(s => s.Extra)} · Blocking {known.Sum(s => s.Blocking)}"
             + (known.Count < boardRoster.Length ? " (read retainers only)" : ""));
         DrawFillButton(null);
-        var columns = Math.Clamp((int)(ImGui.GetContentRegionAvail().X / (27 * em)), 1, 3);
+        DrawBoardLegend();
+        var cardWidth = 39 * em;
+        var columns = Math.Clamp((int)(ImGui.GetContentRegionAvail().X / cardWidth), 1, 3);
         if (!ImGui.BeginTable("##retainer-board", columns,
-            ImGuiTableFlags.SizingStretchSame | ImGuiTableFlags.BordersInnerV | ImGuiTableFlags.ScrollY,
-            new Vector2(0, ImGui.GetContentRegionAvail().Y))) return;
+            ImGuiTableFlags.SizingStretchSame | ImGuiTableFlags.BordersInnerV | ImGuiTableFlags.ScrollY | ImGuiTableFlags.ScrollX,
+            new Vector2(0, ImGui.GetContentRegionAvail().Y), Math.Max(cardWidth, ImGui.GetContentRegionAvail().X))) return;
         foreach (var seller in boardRoster)
         {
             ImGui.TableNextColumn();
             ImGui.PushID(seller.Key);
-            var marketMark = DrawBoardHeader(seller, now, em);
+            var marketMark = DrawBoardHeader(seller, now);
             DrawFillButton(seller);
             DrawBoardSlots(seller, marketMark, now, em);
             ImGui.PopID();
@@ -69,7 +72,7 @@ public sealed partial class LowStockTab
         if (noteDirty && !ImGui.IsAnyItemActive()) { configuration.Save(); noteDirty = false; }
     }
 
-    private string DrawBoardHeader(RetainerSnapshot seller, DateTime now, float em)
+    private string DrawBoardHeader(RetainerSnapshot seller, DateTime now)
     {
         var summary = boardAssignments[seller.Key];
         var marketMark = Marker(seller.LastRefreshedUtc, now);
@@ -79,16 +82,24 @@ public sealed partial class LowStockTab
         ImGui.TextUnformatted(seller.RetainerName);
         ImGui.SameLine();
         ImGui.TextDisabled($"Bag {(bagMark == "?" ? "?" : $"{occupied}{bagMark}")} slots" + (seller.Gil is { } gil ? $" · {gil:N0} gil" : ""));
-        ImGui.ProgressBar(summary.Used / (float)Planner.MaxListingSlots, new Vector2(-1, em),
-            $"{(marketMark == "?" ? "?" : $"{summary.Used}{marketMark}")}/20 market slots");
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip(seller.LastRefreshedUtc == DateTime.MinValue ? "Market slots have never been read."
-                : $"Last read {seller.LastRefreshedUtc.ToLocalTime():g}{(marketMark == "!" ? " (stale)" : "")}");
-        if (marketMark == "?") ImGui.TextDisabled("Used ? · Reserved ? · Free ?");
-        else
+        var known = marketMark != "?";
+        ImGui.TextUnformatted($"Used {(known ? summary.Used.ToString() : "?")}{(marketMark == "!" ? " !" : "")}");
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip(known
+            ? $"Market last read {seller.LastRefreshedUtc.ToLocalTime():g}{(marketMark == "!" ? " (stale)" : "")}"
+            : "Market slots have never been read.");
+        ImGui.SameLine();
+        ImGui.TextColored(Muted, $"Reserved {(known ? summary.Reserved.ToString() : "?")}");
+        ImGui.SameLine();
+        ImGui.TextColored(Muted, $"Free {(known ? summary.Free.ToString() : "?")}");
+        if (known && summary.Missing > 0)
         {
-            ImGui.TextUnformatted($"Used {summary.Used} · Reserved {summary.Reserved} · Free {summary.Free}");
-            ImGui.TextUnformatted($"Missing {summary.Missing} · Unplanned {summary.Extra} · Blocking {summary.Blocking}");
+            ImGui.SameLine();
+            ImGui.TextUnformatted($"Missing {summary.Missing}");
+        }
+        if (known && summary.Blocking > 0)
+        {
+            ImGui.SameLine();
+            ImGui.TextColored(BlockingColor, $"Blocking {summary.Blocking}");
         }
         return marketMark;
     }
@@ -250,30 +261,55 @@ public sealed partial class LowStockTab
         _ => "!",
     };
 
+    private static readonly Vector4 PlannedColor = new(.55f, .85f, .65f, 1);
+    private static readonly Vector4 BlockingColor = new(1, .48f, .45f, 1);
+    private static readonly Vector4 UndercutColor = new(1, .60f, .43f, 1);
+    private static readonly Vector4 StuckColor = new(.99f, .78f, .37f, 1);
+    private static readonly Vector4 HoldColor = new(.55f, .75f, 1, 1);
+    private static readonly Vector4 Muted = new(.68f, .69f, .72f, 1);
+
+    private static void DrawBoardLegend()
+    {
+        var first = true;
+        var right = ImGui.GetCursorScreenPos().X + ImGui.GetContentRegionAvail().X;
+        void Key(Vector4 color, string label)
+        {
+            var text = "■ " + label;
+            if (!first && ImGui.GetItemRectMax().X + ImGui.GetStyle().ItemSpacing.X + ImGui.CalcTextSize(text).X <= right)
+                ImGui.SameLine();
+            ImGui.TextColored(color, text);
+            first = false;
+        }
+        Key(PlannedColor, "Filled");
+        Key(Muted, "Reserved / — free");
+        Key(ImGui.GetStyle().Colors[(int)ImGuiCol.Text], "Unplanned");
+        Key(BlockingColor, "Blocking");
+        Key(UndercutColor, "Undercut price");
+        Key(StuckColor, "Stuck age");
+        Key(Muted, "! stale / paused");
+        Key(HoldColor, "Hold");
+    }
+
     private void DrawBoardSlots(RetainerSnapshot seller, string marketMark, DateTime now, float em)
     {
-        if (!ImGui.BeginTable("##slots", 4, ImGuiTableFlags.Borders | ImGuiTableFlags.SizingStretchSame)) return;
+        if (!ImGui.BeginTable("##slots", 6, ImGuiTableFlags.RowBg | ImGuiTableFlags.NoSavedSettings)) return;
+        ImGui.TableSetupColumn("#", ImGuiTableColumnFlags.WidthFixed, 1.5f * em);
+        ImGui.TableSetupColumn("Item", ImGuiTableColumnFlags.WidthStretch);
+        ImGui.TableSetupColumn("Qty", ImGuiTableColumnFlags.WidthFixed, 3 * em);
+        ImGui.TableSetupColumn("Unit price", ImGuiTableColumnFlags.WidthFixed, 6.4f * em);
+        ImGui.TableSetupColumn("Age", ImGuiTableColumnFlags.WidthFixed, 3 * em);
+        ImGui.TableSetupColumn("State", ImGuiTableColumnFlags.WidthFixed, 8 * em);
+        ImGui.TableHeadersRow();
         foreach (var cell in boardCells[seller.Key])
         {
-            ImGui.TableNextColumn();
             ImGui.PushID(cell.Index);
-            if (cell.Listing is { } listing)
-                DrawBoardListing(seller, cell, listing, marketMark, now, em);
-            else
-            {
-                ImGui.BeginGroup();
-                var state = marketMark == "?" ? (cell.Plan == null ? "?" : "Planned ?")
-                    : cell.Plan == null ? "Free" : "Reserved";
-                var clicked = ImGui.Selectable($"{cell.Index + 1} · {state}##slot");
-                if (cell.Plan is { } p)
-                {
-                    DrawItemIcon(p.ItemId, em);
-                    ImGui.TextWrapped($"{ItemName(p.ItemId)}{(p.IsHq ? " HQ" : "")} ×{p.PerListing}");
-                }
-                ImGui.EndGroup();
-                if (clicked || ImGui.IsItemClicked()) OpenSlot(cell);
-            }
+            ImGui.TableNextRow();
+            ImGui.TableNextColumn();
+            if (ImGui.Selectable($"{cell.Index + 1}##slot", false, ImGuiSelectableFlags.SpanAllColumns))
+                OpenSlot(cell);
+            var hovered = ImGui.IsItemHovered();
             DrawSlotPopup(seller, cell, now, em);
+            DrawBoardRow(seller, cell, marketMark, now, em, hovered);
             ImGui.PopID();
         }
         ImGui.EndTable();
@@ -284,54 +320,71 @@ public sealed partial class LowStockTab
         if (Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Item>().TryGetRow(id, out var row)
             && Plugin.Textures.GetFromGameIcon(new GameIconLookup(row.Icon)).GetWrapOrDefault() is { } icon)
             ImGui.Image(icon.Handle, new Vector2(size));
+        else ImGui.Dummy(new Vector2(size));
     }
 
-    private void DrawBoardListing(RetainerSnapshot seller, BoardSlot cell, ListingEntry listing, string marketMark, DateTime now, float em)
+    private void DrawBoardRow(RetainerSnapshot seller, BoardSlot cell, string marketMark, DateTime now, float em, bool hovered)
     {
-        var key = (listing.ItemId, listing.IsHQ);
-        var record = boardRecords![(seller.Key, listing.ListingIndex, key.ItemId, key.IsHQ)].FirstOrDefault();
-        var entry = boardSettings.GetValueOrDefault(key);
-        var scan = Plugin.Instance.ListingScans.Get(seller.Key, listing.ListingIndex, key.ItemId, key.IsHQ);
-        var flags = new List<string>();
-        if (scan is { Offers.Count: > 0 } s && s.Offers[0].Price < listing.UnitPrice) flags.Add("Undercut");
-        if (record != null && ListingTracker.IsStuck(record, now, configuration.StuckListingDays)) flags.Add("Stuck");
-        if (marketMark == "!" || record?.MissingSinceUtc != null) flags.Add("Stale");
-        if (configuration.IsHeld(key.ItemId, key.IsHQ)) flags.Add("Hold");
-        if (entry is { Enabled: false }) flags.Add("Paused");
-        if (flags.Count > 0)
+        var listing = cell.Listing;
+        var plan = cell.Plan;
+        var id = listing?.ItemId ?? plan?.ItemId ?? 0;
+        var hq = listing?.IsHQ ?? plan?.IsHq ?? false;
+        var entry = boardSettings.GetValueOrDefault((id, hq));
+        var record = listing == null ? null : boardRecords![(seller.Key, listing.ListingIndex, id, hq)].FirstOrDefault();
+        var scan = listing == null ? null : Plugin.Instance.ListingScans.Get(seller.Key, listing.ListingIndex, id, hq);
+        var health = BoardListingHealth.Read(listing, record, scan, marketMark == "!", now, configuration.StuckListingDays);
+        var held = id != 0 && configuration.IsHeld(id, hq);
+        var paused = entry is { Enabled: false };
+        var state = cell.Filled ? "Filled" : cell.Blocking ? "Blocking" : listing != null ? "Unplanned"
+            : marketMark == "?" ? (plan == null ? "?" : "Planned ?") : plan == null ? "—" : "Reserved";
+        var normal = ImGui.GetStyle().Colors[(int)ImGuiCol.Text];
+        var stateColor = cell.Filled ? PlannedColor : cell.Blocking ? BlockingColor : listing == null ? Muted : normal;
+        var name = id == 0 ? "—" : (hq ? "HQ " : "") + ItemName(id);
+        ImGui.TableNextColumn();
+        if (id != 0)
         {
-            var color = flags[0] switch
-            {
-                "Undercut" => new Vector4(.55f, .18f, .13f, .68f),
-                "Hold" => new Vector4(.18f, .32f, .52f, .68f),
-                "Paused" => new Vector4(.33f, .27f, .37f, .68f),
-                _ => new Vector4(.48f, .32f, .13f, .68f),
-            };
-            ImGui.TableSetBgColor(ImGuiTableBgTarget.CellBg, ImGui.GetColorU32(color));
+            DrawItemIcon(id, em);
+            ImGui.SameLine(0, em * .25f);
         }
-        var name = ItemName(key.ItemId);
-        var state = cell.Filled ? "Planned" : cell.Blocking ? $"Blocking plan for {ItemName(cell.Plan!.ItemId)}" : "Unplanned";
-        var display = state + " · " + (key.IsHQ ? "HQ " : "") + name;
-        ImGui.BeginGroup();
-        var clicked = ImGui.Selectable($"{cell.Index + 1} · {(cell.Filled ? "Filled" : cell.Blocking ? "Blocking" : "Unplanned")}##slot");
-        DrawItemIcon(key.ItemId, em);
-        ImGui.TextWrapped($"{name}{(key.IsHQ ? " HQ" : "")} ×{listing.Quantity}");
-        ImGui.TextDisabled($"{listing.UnitPrice:N0} g");
-        ImGui.EndGroup();
-        if (clicked || ImGui.IsItemClicked()) OpenSlot(cell);
-        if (ImGui.IsItemHovered())
+        ImGui.TextColored(paused || listing == null ? Muted : normal, name);
+        ImGui.TableNextColumn();
+        if ((listing?.Quantity ?? plan?.PerListing) is { } quantity) RightAligned($"{quantity:N0}");
+        ImGui.TableNextColumn();
+        if (listing != null)
         {
-            var stockItem = entry ?? new LowStockEntry { ItemId = key.ItemId, IsHq = key.IsHQ };
-            var (inventory, listings) = service.StockReadings(stockItem, boardRoster, now);
-            ImGui.BeginTooltip();
-            ImGui.TextUnformatted($"Slot {cell.Index + 1} · {display}");
-            if (flags.Count > 0) ImGui.TextUnformatted(string.Join(" · ", flags));
+            ImGui.PushStyleColor(ImGuiCol.Text, health.UndercuttingPrice.HasValue ? UndercutColor : normal);
+            RightAligned($"{listing.UnitPrice:N0}");
+            ImGui.PopStyleColor();
+        }
+        ImGui.TableNextColumn();
+        if (listing != null) ImGui.TextColored(health.Stuck ? StuckColor : normal, health.DaysListed is { } days ? $"{days}d" : "?");
+        ImGui.TableNextColumn();
+        ImGui.TextColored(stateColor, state);
+        if (health.Stale) { ImGui.SameLine(0, 2); ImGui.TextColored(Muted, "!"); }
+        if (held) { ImGui.SameLine(0, 3); ImGui.TextColored(HoldColor, "Hold"); }
+        if (!hovered) return;
+        ImGui.BeginTooltip();
+        ImGui.TextUnformatted($"Slot {cell.Index + 1} · {name}");
+        ImGui.TextColored(stateColor, cell.Filled ? "Filled as planned" : cell.Blocking
+            ? $"Blocking plan for {(plan!.IsHq ? "HQ " : "")}{ItemName(plan.ItemId)} × {plan.PerListing:N0}"
+            : listing != null ? "Unplanned listing" : marketMark == "?" ? "Market slots have never been read."
+            : plan == null ? "Free slot" : $"Reserved for {plan.PerListing:N0} units");
+        if (health.UndercuttingPrice is { } price) ImGui.TextColored(UndercutColor, $"Undercut: lowest scanned price {price:N0} gil");
+        if (health.Stuck) ImGui.TextColored(StuckColor, $"Stuck: listed {health.DaysListed} days, threshold {Math.Max(1, configuration.StuckListingDays)}");
+        if (health.Stale) ImGui.TextColored(Muted, record?.MissingSinceUtc != null ? "Stale: listing missing on the last read."
+            : $"Stale: market last read {seller.LastRefreshedUtc.ToLocalTime():g}");
+        if (held) ImGui.TextColored(HoldColor, "Hold: skipped by automatic cycles and Fill to plan.");
+        if (paused) ImGui.TextColored(Muted, "Paused: Stock tracking is disabled for this item.");
+        if (id != 0)
+        {
+            var stock = entry ?? new LowStockEntry { ItemId = id, IsHq = hq };
+            var (inventory, listings) = service.StockReadings(stock, boardRoster, now);
             if (!string.IsNullOrWhiteSpace(entry?.Note)) ImGui.TextWrapped(entry.Note);
             if (record != null) ImGui.TextUnformatted($"Listed since {record.FirstSeenUtc.ToLocalTime():g}");
             ImGui.TextUnformatted($"Listed {StockTotal(listings)}");
-            ImGui.TextUnformatted(FormatSupply(stockItem, inventory).Detail);
-            ImGui.TextUnformatted($"Floor {service.EffectiveFloor(key.ItemId, key.IsHQ):N0} gil");
-            ImGui.EndTooltip();
+            ImGui.TextUnformatted(FormatSupply(stock, inventory).Detail);
+            ImGui.TextUnformatted($"Floor {service.EffectiveFloor(id, hq):N0} gil");
         }
+        ImGui.EndTooltip();
     }
 }

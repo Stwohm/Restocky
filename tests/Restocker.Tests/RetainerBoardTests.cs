@@ -1,10 +1,28 @@
 using Restocker.Data;
+using Restocker.Market;
 using Restocker.Plan;
 
 namespace Restocker.Tests;
 
 public sealed class RetainerBoardTests
 {
+    [Fact]
+    public void Undercut_stuck_and_stale_can_be_visible_on_the_same_listing()
+    {
+        var now = DateTime.UnixEpoch.AddDays(9);
+        var listing = new ListingEntry { UnitPrice = 100 };
+        var record = new ListingRecord { FirstSeenUtc = DateTime.UnixEpoch, Outcome = ListingTracker.Active };
+        var scan = new ListingMarketScan(now, 100, [new(90, "Rival", 1)]);
+        Assert.Equal(new BoardListingHealth(90, 9, true, true),
+            BoardListingHealth.Read(listing, record, scan, true, now, 7));
+        record.MissingSinceUtc = now;
+        listing.UnitPrice = 89;
+        Assert.Equal(new BoardListingHealth(null, 9, false, true),
+            BoardListingHealth.Read(listing, record, scan, false, now, 7));
+        Assert.Equal(new BoardListingHealth(null, null, false, false),
+            BoardListingHealth.Read(null, null, null, false, now, 7));
+    }
+
     [Theory]
     [InlineData(199, 20, false)]
     [InlineData(201, 21, true)]
