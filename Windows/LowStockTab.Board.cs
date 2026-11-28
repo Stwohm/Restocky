@@ -4,6 +4,7 @@ using System.Linq;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Textures;
+using Restocker.Common;
 using Restocker.Data;
 using Restocker.Market;
 using Restocker.Plan;
@@ -16,7 +17,7 @@ public sealed partial class LowStockTab
     private DateTime nextBoardRefresh;
     private ulong boardCharacter;
     private RetainerSnapshot[] boardRoster = [];
-    private Dictionary<string, RetainerSlotSummary> boardAssignments = [];
+    private Dictionary<string, SlotLayout> boardAssignments = [];
     private Dictionary<(uint, bool), LowStockEntry> boardSettings = [];
     private ILookup<(string, int, uint, bool), ListingRecord>? boardRecords;
 
@@ -29,10 +30,7 @@ public sealed partial class LowStockTab
         boardRoster = service.CurrentRetainers();
         boardRecords = Plugin.Instance.Tracker.Tracker.ActiveListings.ToLookup(r => (r.RetainerKey, r.Slot, r.ItemId, r.IsHq));
         boardSettings = configuration.LowStock.DistinctBy(e => (e.ItemId, e.IsHq)).ToDictionary(e => (e.ItemId, e.IsHq));
-        var preferred = boardSettings.Values.Where(e => !e.PreferredRetainers.ContainsKey(cid))
-            .ToDictionary(e => e, e => service.PreferredRetainers(e).FirstOrDefault());
-        boardAssignments = boardRoster.ToDictionary(s => s.Key, s => RetainerBoard.Summarize(s, boardSettings.Values,
-            e => preferred.GetValueOrDefault(e), service.PerListing));
+        boardAssignments = boardRoster.ToDictionary(s => s.Key, s => configuration.SlotPlans.Layout(s));
     }
 
     private void DrawBoard()
@@ -45,6 +43,10 @@ public sealed partial class LowStockTab
             return;
         }
         var em = ImGui.GetFontSize();
+        var known = boardRoster.Where(r => r.LastRefreshedUtc != DateTime.MinValue).Select(r => boardAssignments[r.Key]).ToList();
+        ImGui.TextWrapped($"Missing {known.Sum(s => s.Missing)} · Unplanned {known.Sum(s => s.Extra)} · Blocking {known.Sum(s => s.Blocking)}"
+            + (known.Count < boardRoster.Length ? " (read retainers only)" : ""));
+        DrawFillButton(null);
         var columns = Math.Clamp((int)(ImGui.GetContentRegionAvail().X / (27 * em)), 1, 3);
         if (!ImGui.BeginTable("##retainer-board", columns,
             ImGuiTableFlags.SizingStretchSame | ImGuiTableFlags.BordersInnerV | ImGuiTableFlags.ScrollY,
@@ -54,10 +56,13 @@ public sealed partial class LowStockTab
             ImGui.TableNextColumn();
             ImGui.PushID(seller.Key);
             var marketMark = DrawBoardHeader(seller, now, em);
+            DrawPlanEditor(seller);
+            DrawFillButton(seller);
             DrawBoardSlots(seller, marketMark, now, em);
             ImGui.PopID();
         }
         ImGui.EndTable();
+        if (noteDirty && !ImGui.IsAnyItemActive()) { configuration.Save(); noteDirty = false; }
     }
 
     private string DrawBoardHeader(RetainerSnapshot seller, DateTime now, float em)
@@ -75,20 +80,157 @@ public sealed partial class LowStockTab
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip(seller.LastRefreshedUtc == DateTime.MinValue ? "Market slots have never been read."
                 : $"Last read {seller.LastRefreshedUtc.ToLocalTime():g}{(marketMark == "!" ? " (stale)" : "")}");
-        var usage = marketMark == "?" ? "using ?, free ?" : $"using {summary.Used}{marketMark}, free {summary.Free}{marketMark}";
-        var label = $"Assigned {summary.Assigned} slots, {usage}";
-        if (summary.OverAssigned) ImGui.TextColored(new Vector4(1, .4f, .37f, 1), label);
-        else ImGui.TextUnformatted(label);
-        if (summary.Items.Count > 0 && ImGui.TreeNode("Assigned items"))
+        if (marketMark == "?") ImGui.TextDisabled("Used ? · Reserved ? · Free ?");
+        else
         {
-            foreach (var assignment in summary.Items)
-            {
-                var item = assignment.Item;
-                ImGui.TextWrapped($"{ItemName(item.ItemId)}{(item.IsHq ? " HQ" : "")}{(item.Enabled ? "" : " (paused)")} · {assignment.Needed} planned / {assignment.Used} used");
-            }
-            ImGui.TreePop();
+            ImGui.TextUnformatted($"Used {summary.Used} · Reserved {summary.Reserved} · Free {summary.Free}");
+            ImGui.TextUnformatted($"Missing {summary.Missing} · Unplanned {summary.Extra} · Blocking {summary.Blocking}");
         }
         return marketMark;
+    }
+
+    private string planSearch = "";
+    private string? planError;
+    private SlotPlanRow draft = new(0, false, 1, 1);
+    private int editingRow;
+
+    private void DrawFillButton(RetainerSnapshot? seller)
+    {
+        var rows = (seller == null ? boardRoster.AsEnumerable() : [seller])
+            .SelectMany(r => configuration.SlotPlans.Rows(r.Key)).ToList();
+        ImGui.BeginDisabled(rows.Count == 0 || executor.IsRunning || !AddonHelper.IsOpen("RetainerList"));
+        if (ImGui.SmallButton(seller == null ? "Fill to plan (all)" : "Fill to plan"))
+            SubmitRestock(configuration.LowStock.Where(e => rows.Any(r => r.Matches(e.ItemId, e.IsHq))
+                && !configuration.IsHeld(e.ItemId, e.IsHq)), boardCharacter, true, seller?.Key);
+        ImGui.EndDisabled();
+    }
+
+    private void DrawBoardStockSettings(uint id, bool hq)
+    {
+        var key = (id, hq);
+        var entry = boardSettings.GetValueOrDefault(key);
+        if (entry == null)
+        {
+            if (ImGui.SmallButton("Track item"))
+            {
+                entry = new() { ItemId = id, IsHq = hq };
+                boardSettings[key] = entry;
+                configuration.LowStock.Add(entry);
+                configuration.Save();
+            }
+            return;
+        }
+
+        var bell = AddonHelper.IsOpen("RetainerList");
+        ImGui.BeginDisabled(!bell || executor.IsRunning || !entry.Enabled);
+        if (ImGui.SmallButton("Restock item")) SubmitRestock([entry], boardCharacter);
+        ImGui.EndDisabled();
+        var editing = false;
+        if (DrawSettings(entry, ItemName(id), boardCharacter, boardRoster.Select(r => r.RetainerName).ToArray(),
+            service.ListedUnits(id, hq) == 0, bell, ref editing))
+        {
+            configuration.LowStock.Remove(entry);
+            selected.Remove(key);
+            restockPrice.Remove(key);
+            nextBoardRefresh = DateTime.MinValue;
+            configuration.Save();
+            ImGui.CloseCurrentPopup();
+        }
+    }
+
+    private void DrawPlanEditor(RetainerSnapshot seller)
+    {
+        var rows = configuration.SlotPlans.Rows(seller.Key).ToList();
+        void Save()
+        {
+            if (!configuration.SlotPlans.TrySave(seller.Key, rows, out planError)) return;
+            configuration.Save();
+            nextBoardRefresh = DateTime.MinValue;
+        }
+        void Open(int index)
+        {
+            editingRow = index;
+            draft = index < 0 ? new(0, false, 1, 1) : rows[index];
+            planSearch = "";
+            planError = null;
+            ImGui.OpenPopup("Edit plan");
+        }
+
+        if (ImGui.SmallButton("Add item")) Open(-1);
+        for (var i = 0; i < rows.Count; i++)
+        {
+            var row = rows[i];
+            ImGui.PushID(i);
+            ImGui.TextWrapped($"{ItemName(row.ItemId)}{(row.IsHq ? " HQ" : "")} · {row.Slots} × {row.PerListing}");
+            var edit = ImGui.SmallButton("Edit");
+            ImGui.SameLine();
+            if (ImGui.SmallButton("Settings")) ImGui.OpenPopup("stock");
+            if (ImGui.BeginPopup("stock"))
+            {
+                DrawBoardStockSettings(row.ItemId, row.IsHq);
+                ImGui.EndPopup();
+            }
+            ImGui.SameLine();
+            var up = ImGui.SmallButton("Up") && i > 0;
+            ImGui.SameLine();
+            var down = ImGui.SmallButton("Down") && i + 1 < rows.Count;
+            ImGui.SameLine();
+            var remove = ImGui.SmallButton("Remove");
+            ImGui.PopID();
+            if (edit) Open(i);
+            if (up || down)
+            {
+                var other = up ? i - 1 : i + 1;
+                (rows[i], rows[other]) = (rows[other], rows[i]);
+                Save();
+                break;
+            }
+            if (remove) { rows.RemoveAt(i); Save(); break; }
+        }
+        if (!ImGui.BeginPopup("Edit plan")) return;
+        if (editingRow < 0)
+        {
+            ImGui.InputTextWithHint("##find", "Search stock or inventory", ref planSearch, 80);
+            var character = configuration.Characters.GetValueOrDefault(CharacterSnapshot.MakeKey(boardCharacter));
+            var inventory = boardRoster.SelectMany(r => r.Inventory)
+                .Concat(character?.Bag ?? []).Concat(character?.Saddlebag ?? []).Concat(character?.PremiumSaddlebag ?? []);
+            var choices = boardSettings.Keys.Concat(inventory.Where(i => i.IsListable).Select(i => (i.ItemId, i.IsHQ))).Distinct();
+            if (ImGui.BeginListBox("##items"))
+            {
+                foreach (var (id, hq) in choices)
+                {
+                    var name = ItemName(id) + (hq ? " HQ" : "");
+                    if (!name.Contains(planSearch, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (ImGui.Selectable($"{name}##{id}-{hq}", draft.Matches(id, hq))) draft = draft with { ItemId = id, IsHq = hq };
+                }
+                ImGui.EndListBox();
+            }
+        }
+        if (draft.ItemId != 0) ImGui.TextUnformatted(ItemName(draft.ItemId) + (draft.IsHq ? " HQ" : ""));
+        var slots = draft.Slots;
+        var qty = draft.PerListing;
+        ImGui.InputInt("Slots", ref slots);
+        ImGui.InputInt("Units per listing", ref qty);
+        draft = draft with { Slots = slots, PerListing = qty };
+        var total = rows.Where((_, i) => i != editingRow).Sum(r => (long)r.Slots) + slots;
+        if (total > 20) ImGui.TextColored(new Vector4(1, .4f, .37f, 1), $"{total}/20 slots. Reduce slots to save.");
+        if (ImGui.Button("Save") && draft.ItemId != 0)
+        {
+            if (editingRow < 0) rows.Add(draft);
+            else rows[editingRow] = draft;
+            if (Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Item>().TryGetRow(draft.ItemId, out var item)
+                && qty > RetainerWatcher.ResolveMaxListingStack(item)) planError = "Quantity exceeds this item's listing limit.";
+            else if (configuration.SlotPlans.TrySave(seller.Key, rows, out planError))
+            {
+                if (!configuration.LowStock.Any(e => draft.Matches(e.ItemId, e.IsHq)))
+                    configuration.LowStock.Add(new() { ItemId = draft.ItemId, IsHq = draft.IsHq });
+                configuration.Save();
+                nextBoardRefresh = DateTime.MinValue;
+                ImGui.CloseCurrentPopup();
+            }
+        }
+        if (planError != null) ImGui.TextColored(new Vector4(1, .4f, .37f, 1), planError);
+        ImGui.EndPopup();
     }
 
     private string Marker(DateTime stamp, DateTime now) => service.Freshness(stamp, now).State switch
@@ -100,27 +242,32 @@ public sealed partial class LowStockTab
 
     private void DrawBoardSlots(RetainerSnapshot seller, string marketMark, DateTime now, float em)
     {
-        if (ImGui.BeginTable("##slots", 4, ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp))
+        if (!ImGui.BeginTable("##slots", 4, ImGuiTableFlags.Borders | ImGuiTableFlags.SizingStretchSame)) return;
+        foreach (var cell in boardAssignments[seller.Key].Slots)
         {
-            ImGui.TableSetupColumn("Slot / item", ImGuiTableColumnFlags.WidthStretch);
-            ImGui.TableSetupColumn("Qty", ImGuiTableColumnFlags.WidthFixed, 2.8f * em);
-            ImGui.TableSetupColumn("Gil/unit", ImGuiTableColumnFlags.WidthFixed, 4.6f * em);
-            ImGui.TableSetupColumn("Age", ImGuiTableColumnFlags.WidthFixed, 2.5f * em);
-            ImGui.TableHeadersRow();
-            for (var slot = 0; slot < Planner.MaxListingSlots; slot++)
+            ImGui.TableNextColumn();
+            ImGui.PushID(cell.Index);
+            if (cell.Listing is { } listing)
+                DrawBoardListing(seller, cell.Index, listing, marketMark, now, em);
+            else if (cell.Plan is { } p)
             {
-                ImGui.TableNextRow();
-                ImGui.TableNextColumn();
-                var listing = seller.Listings.Find(l => l.ListingIndex == slot);
-                if (listing == null)
-                {
-                    ImGui.TextDisabled($"{slot + 1,2}  {(marketMark == "?" ? "?" : "Empty")}");
-                    continue;
-                }
-                DrawBoardListing(seller, slot, listing, marketMark, now, em);
+                ImGui.TextDisabled($"{cell.Index + 1} · {(marketMark == "?" ? "Planned ?" : "Reserved")}");
+                ImGui.BeginDisabled();
+                DrawItemIcon(p.ItemId, em);
+                ImGui.TextWrapped($"{ItemName(p.ItemId)}{(p.IsHq ? " HQ" : "")} ×{p.PerListing}");
+                ImGui.EndDisabled();
             }
-            ImGui.EndTable();
+            else ImGui.TextDisabled($"{cell.Index + 1} · {(marketMark == "?" ? "?" : "Free")}");
+            ImGui.PopID();
         }
+        ImGui.EndTable();
+    }
+
+    private static void DrawItemIcon(uint id, float size)
+    {
+        if (Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Item>().TryGetRow(id, out var row)
+            && Plugin.Textures.GetFromGameIcon(new GameIconLookup(row.Icon)).GetWrapOrDefault() is { } icon)
+            ImGui.Image(icon.Handle, new Vector2(size));
     }
 
     private void DrawBoardListing(RetainerSnapshot seller, int slot, ListingEntry listing, string marketMark, DateTime now, float em)
@@ -144,27 +291,14 @@ public sealed partial class LowStockTab
                 "Paused" => new Vector4(.33f, .27f, .37f, .68f),
                 _ => new Vector4(.48f, .32f, .13f, .68f),
             };
-            ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, ImGui.GetColorU32(color));
+            ImGui.TableSetBgColor(ImGuiTableBgTarget.CellBg, ImGui.GetColorU32(color));
         }
         var name = ItemName(key.ItemId);
-        if (Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Item>().TryGetRow(key.ItemId, out var row)
-            && Plugin.Textures.GetFromGameIcon(new GameIconLookup(row.Icon)).GetWrapOrDefault() is { } icon)
-        {
-            ImGui.Image(icon.Handle, new Vector2(em));
-            ImGui.SameLine(0, 2);
-        }
-        var display = (key.IsHQ ? "HQ " : "") + name;
-        if (ImGui.Selectable($"{slot + 1,2}  {display}##slot-{slot}", false, ImGuiSelectableFlags.SpanAllColumns))
-        {
-            focusedItem = key;
-            search = name;
-            kindFilter = StockKind.None;
-            statusFilter = StockStatus.None;
-            categoryFilter = null;
-            onlyLow = false;
-            configuration.ShowRetainerBoard = false;
-            configuration.Save();
-        }
+        var cell = boardAssignments[seller.Key].Slots[slot];
+        var state = cell.Filled ? "Planned" : cell.Blocking ? $"Blocking plan for {ItemName(cell.Plan!.ItemId)}" : "Unplanned";
+        var display = state + " · " + (key.IsHQ ? "HQ " : "") + name;
+        if (ImGui.Selectable($"{slot + 1} · {(cell.Filled ? "Filled" : cell.Blocking ? "Blocking" : "Unplanned")}##slot"))
+            ImGui.OpenPopup("listing");
         if (ImGui.IsItemHovered())
         {
             var stockItem = entry ?? new LowStockEntry { ItemId = key.ItemId, IsHq = key.IsHQ };
@@ -173,17 +307,31 @@ public sealed partial class LowStockTab
             ImGui.TextUnformatted($"Slot {slot + 1} · {display}");
             if (flags.Count > 0) ImGui.TextUnformatted(string.Join(" · ", flags));
             if (!string.IsNullOrWhiteSpace(entry?.Note)) ImGui.TextWrapped(entry.Note);
+            if (record != null) ImGui.TextUnformatted($"Listed since {record.FirstSeenUtc.ToLocalTime():g}");
             ImGui.TextUnformatted($"Listed {StockTotal(listings)}");
             ImGui.TextUnformatted(FormatSupply(stockItem, inventory).Detail);
             ImGui.TextUnformatted($"Floor {service.EffectiveFloor(key.ItemId, key.IsHQ):N0} gil");
             ImGui.EndTooltip();
         }
-        ImGui.TableNextColumn();
-        ImGui.TextUnformatted($"{listing.Quantity:N0}");
-        ImGui.TableNextColumn();
-        ImGui.TextUnformatted($"{listing.UnitPrice:N0}");
-        ImGui.TableNextColumn();
-        var age = now - record?.FirstSeenUtc;
-        ImGui.TextUnformatted(age is not { } a ? "?" : a.TotalDays >= 1 ? $"{(int)a.TotalDays}d" : $"{(int)a.TotalHours}h");
+        DrawItemIcon(key.ItemId, em);
+        ImGui.TextWrapped($"{name}{(key.IsHQ ? " HQ" : "")} ×{listing.Quantity}");
+        ImGui.TextDisabled($"{listing.UnitPrice:N0} g");
+        if (ImGui.BeginPopup("listing"))
+        {
+            DrawBoardStockSettings(key.ItemId, key.IsHQ);
+            if (ImGui.SmallButton("Show in Stock list"))
+            {
+                focusedItem = key;
+                search = name;
+                kindFilter = StockKind.None;
+                statusFilter = StockStatus.None;
+                categoryFilter = null;
+                onlyLow = false;
+                configuration.ShowRetainerBoard = false;
+                configuration.Save();
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.EndPopup();
+        }
     }
 }

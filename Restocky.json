@@ -13,5 +13,5 @@
     "list"
   ],
   "RepoUrl": "https://github.com/Stwohm/Restocky",
-  "Changelog": "0.3.17.0 — [Match] in the chat summary now applies the price right away: clicking it at the summoning bell reprices only that item's listings (no full cycle); away from the bell it is queued for the next cycle and chat says why. Stock tracking: create your own categories (⚙ → Category), rows grouped under collapsible headers. A new listing the server did not accept (TimedOut) is retried once when nothing left the bag."
+  "Changelog": "0.3.17.0 — [Match] in the chat summary applies the price right away: at the summoning bell it reprices only that item's listings (no full cycle); otherwise it is queued for the next cycle and chat says why. New per-item Keep setting (default 0): restock and bulk listing never take your inventory below it. Stock tracking: your own collapsible categories, and a Retainer board / slot planner (one click away): plan which items each retainer sells and how many slots; planned slots stay reserved so other listings cannot lock them; Fill to plan lists the missing ones. Fix: restock opens 'Sell items in your inventory' again (0.3.16 opened the retainer inventory and some listings timed out); a listing the server did not accept is retried once."
 }

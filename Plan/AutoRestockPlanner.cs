@@ -17,9 +17,10 @@ internal static class AutoRestockPlanner
     internal static List<AutoRestockPlan> Plan(
         IEnumerable<LowStockEntry> entries, IReadOnlyCollection<RetainerSnapshot> retainers, CharacterSnapshot? character,
         ListingTracker tracker, Func<uint, bool, bool> isHeld, Func<uint, bool, long> floorFor,
-        Func<uint, bool, int>? keepFor = null)
+        Func<uint, bool, int>? keepFor = null, SlotPlans? slotPlans = null)
     {
         var plans = new List<AutoRestockPlan>();
+        var earlier = new List<PlannedAction>();
         var keys = retainers.Select(r => r.Key).ToHashSet();
         var owner = retainers.FirstOrDefault();
         if (owner == null) return plans;
@@ -33,7 +34,9 @@ internal static class AutoRestockPlanner
 
             var existing = listings[(itemId, hq)];
             var listedUnits = existing.Sum(l => l.Quantity);
-            if (listedUnits > entry.Threshold || listedUnits >= entry.Target) continue;
+            var plannedTarget = slotPlans?.Target(owner.CharacterContentId, itemId, hq) ?? 0;
+            var target = plannedTarget > 0 ? plannedTarget : entry.Target;
+            if (listedUnits > entry.Threshold || listedUnits >= target) continue;
 
             var sellOn = entry.PreferredRetainers.GetValueOrDefault(owner.CharacterContentId);
             var preferences = tracker.PreferredRetainers(itemId, hq, keys);
@@ -49,9 +52,9 @@ internal static class AutoRestockPlanner
             }
 
             var sources = Sources(itemId, hq, retainers, character, keepFor?.Invoke(itemId, hq) ?? 0);
-            var actions = RestockPlanner.Plan(itemId, hq, entry.Target, listedUnits,
+            var actions = RestockPlanner.Plan(itemId, hq, target, listedUnits,
                 RestockPlanner.PerListing(entry, existing.Select(l => l.Quantity)), price, sources, free,
-                preferences, sellOn, retainers);
+                preferences, sellOn, retainers, slotPlans, earlier);
             if (actions.Count == 0)
             {
                 var reason = sources.Count == 0 ? RestockSkipReason.NoStock
@@ -68,6 +71,7 @@ internal static class AutoRestockPlanner
                     action.ResolveRestockPrice = true;
                     action.UnitPrice = 0;
                 }
+            earlier.AddRange(actions);
             foreach (var action in actions) free[action.RetainerKey]--;
             plans.Add(new AutoRestockPlan(itemId, hq, kind, actions));
         }

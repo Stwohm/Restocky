@@ -10,6 +10,7 @@ public class StockTrackingConfiguration
     public List<LowStockEntry> LowStock { get; set; } = new();
     public StockCategories StockCategories { get; set; } = new();
     public Dictionary<string, int> InventoryReserves { get; set; } = new();
+    public SlotPlans SlotPlans { get; set; } = new();
     public bool ShowRetainerBoard { get; set; }
 
     internal int KeepFor(uint itemId, bool hq)

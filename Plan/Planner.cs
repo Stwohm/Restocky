@@ -117,7 +117,8 @@ public static class Planner
         int? listingsCap = null,
         int? perListingQty = null,
         int alreadyPlanned = 0,
-        int availableForCharacter = int.MaxValue)
+        int availableForCharacter = int.MaxValue,
+        bool stockRestock = false)
     {
         var result = new List<PlannedAction>();
         if (maxStackPerListing <= 0) return result;
@@ -145,6 +146,7 @@ public static class Planner
                 Kind = PlannedActionKind.NewListing,
                 RetainerKey = targetRetainer.Key,
                 SourceKey = sourceKey,
+                StockRestock = stockRestock,
                 ItemId = itemId,
                 IsHQ = isHQ,
                 Quantity = qtyPer,
@@ -160,6 +162,7 @@ public static class Planner
                 Kind = PlannedActionKind.NewListing,
                 RetainerKey = targetRetainer.Key,
                 SourceKey = sourceKey,
+                StockRestock = stockRestock,
                 ItemId = itemId,
                 IsHQ = isHQ,
                 Quantity = remaining,
@@ -167,6 +170,53 @@ public static class Planner
             });
         }
         return result;
+    }
+
+    internal static List<PlannedAction> PlanBulk(SlotPlans plans, IReadOnlyList<RetainerSnapshot> roster,
+        RetainerSnapshot selected, CharacterSnapshot? character, string sourceKey, uint item, bool hq,
+        long price, int maxStack, int slots, int quantity, int keep, IReadOnlyList<PlannedAction> earlier)
+    {
+        var fixedSource = sourceKey == selected.Key;
+        if (!plans.ForCharacter(selected.CharacterContentId).Any())
+            return fixedSource ? PlanNewListings([selected], item, hq, price, maxStack, listingsCap: slots, perListingQty: quantity)
+                : character == null ? [] : PlanCharacterSource(character, sourceKey, selected, item, hq, price, maxStack,
+                    slots, quantity, keep, earlier);
+
+        var result = new List<PlannedAction>();
+        var previous = earlier.Where(a => a.Kind == PlannedActionKind.NewListing && a.ItemId == item && a.IsHQ == hq).ToList();
+        var saddle = character?.Saddlebag.Concat(character.PremiumSaddlebag) ?? [];
+        IEnumerable<InventoryEntry> inventory = fixedSource ? selected.Inventory
+            : sourceKey == CharacterSnapshot.MakeKey(selected.CharacterContentId) + ".bag" ? character?.Bag ?? []
+            : sourceKey == CharacterSnapshot.MakeKey(selected.CharacterContentId) + ".saddle" ? saddle : [];
+        var consumed = previous.Where(a => a.SourceKey == sourceKey).Sum(a => a.Quantity);
+        var budget = int.MaxValue;
+        if (!fixedSource && character != null && keep > 0)
+        {
+            var prefix = CharacterSnapshot.MakeKey(selected.CharacterContentId) + ".";
+            var held = character.Bag.Concat(saddle).Where(i => i.IsListable && i.ItemId == item && i.IsHQ == hq).Sum(i => i.Quantity);
+            budget = InventoryReserve.Available(held, keep) - previous.Where(a => a.SourceKey.StartsWith(prefix)).Sum(a => a.Quantity);
+        }
+        var transferable = !fixedSource || InventoryEntry.IsCrystal(item);
+        var candidates = roster.Where(r => r.LastRefreshedUtc != DateTime.MinValue && (transferable || r.Key == selected.Key))
+            .Select(r => (Seller: r, Layout: plans.Layout(r, earlier))).ToList();
+        foreach (var (seller, layout) in candidates) Add(seller, layout.ReservedFor(item, hq));
+        var assigned = plans.Target(selected.CharacterContentId, item, hq) > 0;
+        foreach (var (seller, layout) in candidates.OrderByDescending(c => c.Seller.Key == selected.Key)
+            .ThenByDescending(c => c.Layout.Free))
+            if (seller.Key == selected.Key || assigned) Add(seller, layout.OverflowFor(item, hq));
+        return result;
+
+        void Add(RetainerSnapshot seller, int capacity)
+        {
+            var count = Math.Min(capacity, slots - result.Count);
+            if (count <= 0) return;
+            var actions = PlanFromInventoryList(inventory, sourceKey, seller, item, hq, price, maxStack,
+                count, quantity, consumed, budget, stockRestock: fixedSource && seller.Key != selected.Key);
+            var units = actions.Sum(a => a.Quantity);
+            consumed += units;
+            budget -= units;
+            result.AddRange(actions);
+        }
     }
 
     internal static List<PlannedAction> PlanCharacterSource(CharacterSnapshot character, string sourceKey,

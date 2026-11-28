@@ -252,7 +252,8 @@ public sealed partial class LowStockTab
             var key = (e.ItemId, e.IsHq);
             var id = $"{e.ItemId}-{e.IsHq}";
             var low = e.IsLow(listed);
-            var to = e.Target;
+            var plannedTarget = service.PlannedTarget(e);
+            var to = plannedTarget > 0 ? plannedTarget : e.Target;
             var autoPrice = listed == 0;
             if (collapsed && !(selectLow && low)) return;
             var chosenPrice = autoPrice || !ready || !e.Enabled ? default : restockPrice.TryGetValue(key, out var rp) ? rp : service.PriceForRestock(e);
@@ -400,14 +401,23 @@ public sealed partial class LowStockTab
         }
         DrawRowOptions(e, cid, names);
         DrawRestockMode(e);
-        var to = e.Target;
+        var plannedTarget = service.PlannedTarget(e);
+        var to = plannedTarget > 0 ? plannedTarget : e.Target;
+        var enabled = e.Enabled;
+        if (ImGui.Checkbox("Enabled", ref enabled)) { e.Enabled = enabled; configuration.Save(); }
         var threshold = e.Threshold;
         if (ImGui.InputInt(Strings.StockThreshold, ref threshold, 0)) { e.Threshold = Math.Max(0, threshold); configuration.Save(); }
+        ImGui.BeginDisabled(plannedTarget > 0);
         if (ImGui.InputInt(Strings.StockTarget, ref to, 0)) { e.Target = Math.Max(0, to); configuration.Save(); }
+        ImGui.EndDisabled();
+        if (plannedTarget > 0 && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+            ImGui.SetTooltip("Sum of planned slots × units per listing across your retainers.");
         ListTab.DrawKeep(configuration, e.ItemId, e.IsHq, "Keep in inventory");
         var per = e.PerListing;
+        ImGui.BeginDisabled(plannedTarget > 0);
         if (ImGui.InputInt(Strings.StockPerListing, ref per, 0)) { e.PerListing = Math.Max(0, per); configuration.Save(); }
         if (ImGui.IsItemHovered()) ImGui.SetTooltip($"0 = same as your current listings ({service.PerListing(e):N0})");
+        ImGui.EndDisabled();
         DrawPricing(e, autoPrice, bellOpen);
         ImGui.Separator();
         var note = e.Note ?? string.Empty;
@@ -418,7 +428,12 @@ public sealed partial class LowStockTab
             noteDirty = true;
         }
         editingNote |= ImGui.IsItemActive();
-        return ImGui.SmallButton("Remove item");
+        var assigned = configuration.SlotPlans.Values.Any(rows => rows.Any(r => r.Matches(e.ItemId, e.IsHq)));
+        ImGui.BeginDisabled(assigned);
+        var remove = ImGui.SmallButton("Remove item");
+        ImGui.EndDisabled();
+        if (assigned && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled)) ImGui.SetTooltip("Remove this item's plan rows first.");
+        return remove;
     }
 
     private void DrawPricing(LowStockEntry e, bool autoPrice, bool bellOpen)
@@ -540,6 +555,12 @@ public sealed partial class LowStockTab
             entry.Status = status;
             configuration.Save();
         }
+        if (service.PlannedTarget(entry) > 0)
+        {
+            var planned = service.CurrentRetainers().Where(r => configuration.SlotPlans.Rows(r.Key).Any(p => p.Matches(entry.ItemId, entry.IsHq)));
+            ImGui.TextWrapped($"{Strings.SellOn}: {string.Join(", ", planned.Select(r => r.RetainerName))}");
+            return;
+        }
         var selected = entry.PreferredRetainers.GetValueOrDefault(cid);
         var seller = $"{Strings.SellOn}: {selected ?? Strings.ResetFloorToAuto}";
         ImGui.SetNextItemWidth(-1);
@@ -584,14 +605,21 @@ public sealed partial class LowStockTab
 
     private void RestockSelected(ulong characterId)
     {
-        var entries = configuration.LowStock.Where(e => selected.Contains((e.ItemId, e.IsHq)));
+        SubmitRestock(configuration.LowStock.Where(e => selected.Contains((e.ItemId, e.IsHq))), characterId);
+    }
+
+    private void SubmitRestock(IEnumerable<LowStockEntry> entries, ulong characterId, bool fillOnly = false, string? seller = null)
+    {
+        var earlier = new List<PlannedAction>();
         var batch = RestockPlanner.PlanBatch(entries, service.FreeListingSlots(), (entry, free) =>
         {
             var key = (entry.ItemId, entry.IsHq);
             var market = service.ListedUnits(entry.ItemId, entry.IsHq) == 0;
             var price = market ? default : restockPrice.TryGetValue(key, out var chosen) ? chosen : service.PriceForRestock(entry);
             var actions = service.PlanRestock(entry, entry.Target,
-                market ? 1 : price.UnitPrice, allowTopUps: !market, freeSlots: free);
+                market ? 1 : price.UnitPrice, allowTopUps: !market && !fillOnly, freeSlots: free,
+                earlier: earlier, fillOnly: fillOnly, fillRetainer: seller);
+            earlier.AddRange(actions);
             if (market) SetMarketPricing(actions);
             else SetRowPrice(actions, price);
             return actions;

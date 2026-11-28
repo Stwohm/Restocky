@@ -194,7 +194,7 @@ public sealed class LowStockService : IDisposable
 
         var character = configuration.Characters.GetValueOrDefault(CharacterSnapshot.MakeKey(Cid()));
         var plan = AutoRestockPlanner.Plan(configuration.LowStock, retainers, character, tracker, configuration.IsHeld,
-                (id, hq) => configuration.EffectiveFloorFor(id, hq, costLedger).Price, configuration.KeepFor)
+                (id, hq) => configuration.EffectiveFloorFor(id, hq, costLedger).Price, configuration.KeepFor, configuration.SlotPlans)
             .Find(p => p.ItemId == entry.ItemId && p.IsHq == entry.IsHq);
         if (plan == null) return $"{Strings.StockCycleEnoughListed}\n{Strings.StockCycleSnapshot}";
         if (plan.Actions.Count == 0)
@@ -232,21 +232,27 @@ public sealed class LowStockService : IDisposable
         return string.Join("\n", lines);
     }
 
+    internal int PlannedTarget(LowStockEntry e) => configuration.SlotPlans.Target(Cid(), e.ItemId, e.IsHq);
+
     internal Dictionary<string, int> FreeListingSlots() => MyRetainers().ToDictionary(
         s => s.Key, s => Math.Max(0, Planner.MaxListingSlots - s.Listings.Count));
 
     public List<PlannedAction> PlanRestock(LowStockEntry e, int targetUnits, long unitPrice, bool allowTopUps = true,
-        IReadOnlyDictionary<string, int>? freeSlots = null)
+        IReadOnlyDictionary<string, int>? freeSlots = null, IReadOnlyList<PlannedAction>? earlier = null,
+        bool fillOnly = false, string? fillRetainer = null)
     {
         var cid = Cid();
         if (!e.Enabled || cid == 0) return [];
-        var retainers = MyRetainers().ToList();
-        var sources = Sources(e.ItemId, e.IsHq);
+        var retainers = configuration.SlotPlans.ForCharacter(cid).Any() ? CurrentRetainers().ToList() : MyRetainers().ToList();
+        var sources = AutoRestockPlanner.Sources(e.ItemId, e.IsHq, retainers,
+            configuration.Characters.GetValueOrDefault(CharacterSnapshot.MakeKey(cid)), configuration.KeepFor(e.ItemId, e.IsHq));
         var listed = ListedUnits(e.ItemId, e.IsHq);
         var actions = new List<PlannedAction>();
         var floor = configuration.EffectiveFloorFor(e.ItemId, e.IsHq, costLedger).Price;
         if (unitPrice > 0) unitPrice = Math.Max(unitPrice, floor);
-        if (allowTopUps && configuration.TopUpPartialStacksOnRestock && listed > 0 && sources.Count > 0
+        var plannedTarget = PlannedTarget(e);
+        if (plannedTarget > 0) targetUnits = plannedTarget;
+        if (allowTopUps && plannedTarget == 0 && !fillOnly && configuration.TopUpPartialStacksOnRestock && listed > 0 && sources.Count > 0
             && Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Item>().TryGetRow(e.ItemId, out var row))
         {
             var active = tracker.ActiveFor(e.ItemId, e.IsHq).Where(r => r.MissingSinceUtc == null)
@@ -263,7 +269,8 @@ public sealed class LowStockService : IDisposable
 
         var free = freeSlots ?? retainers.ToDictionary(s => s.Key, s => Math.Max(0, Planner.MaxListingSlots - s.Listings.Count));
         actions.AddRange(RestockPlanner.Plan(e.ItemId, e.IsHq, targetUnits, listed, PerListing(e), unitPrice,
-            sources, free, PreferredRetainers(e), e.PreferredRetainers.GetValueOrDefault(cid), retainers));
+            sources, free, PreferredRetainers(e), e.PreferredRetainers.GetValueOrDefault(cid), retainers,
+            configuration.SlotPlans, earlier, fillOnly, fillRetainer));
         return actions;
     }
 

@@ -115,16 +115,10 @@ public sealed class ListTab
     {
         if (!configuration.Snapshots.TryGetValue(p.TargetKey, out var target)) return new List<PlannedAction>();
 
-        // SourceKey が retainer key の場合は PlanNewListings、char.* なら PlanFromInventoryList
-        if (p.SourceKey == p.TargetKey && configuration.Snapshots.TryGetValue(p.SourceKey, out var srcSnap))
-        {
-            return Planner.PlanNewListings(
-                new[] { srcSnap }, p.ItemId, p.IsHQ, p.UnitPrice, p.MaxStack,
-                listingsCap: p.Slots, perListingQty: p.QtyPer);
-        }
-        if (!configuration.Characters.TryGetValue(CharacterSnapshot.MakeKey(target.CharacterContentId), out var character)) return [];
-        return Planner.PlanCharacterSource(character, p.SourceKey, target, p.ItemId, p.IsHQ, p.UnitPrice,
-            p.MaxStack, p.Slots, p.QtyPer, configuration.KeepFor(p.ItemId, p.IsHQ), earlier);
+        var character = configuration.Characters.GetValueOrDefault(CharacterSnapshot.MakeKey(target.CharacterContentId));
+        var roster = configuration.Snapshots.Values.Where(r => r.CharacterContentId == target.CharacterContentId).ToList();
+        return Planner.PlanBulk(configuration.SlotPlans, roster, target, character, p.SourceKey, p.ItemId, p.IsHQ,
+            p.UnitPrice, p.MaxStack, p.Slots, p.QtyPer, configuration.KeepFor(p.ItemId, p.IsHQ), earlier);
     }
 
     private (int? qtyPer, int? slots) ResolveLots(string priceKey)
@@ -460,12 +454,18 @@ public sealed class ListTab
             return;
         }
 
+        if (!editedTarget.ContainsKey(key))
+        {
+            var planned = retainers.FirstOrDefault(s => configuration.SlotPlans.Rows(s.Key).Any(p => p.Matches(r.ItemId, r.IsHQ)));
+            if (planned != null) editedTarget[key] = planned.Key;
+        }
         var current = editedTarget.GetValueOrDefault(key, string.Empty);
         var labels = new List<string> { Strings.CharBagPickTarget };
         var keys = new List<string> { string.Empty };
         foreach (var ret in retainers)
         {
-            var freeSlots = Planner.MaxListingSlots - ret.Listings.Count;
+            var layout = configuration.SlotPlans.Layout(ret);
+            var freeSlots = layout.OverflowFor(r.ItemId, r.IsHQ) + layout.ReservedFor(r.ItemId, r.IsHQ);
             labels.Add($"{ret.RetainerName} ({freeSlots} {Strings.FreeSlots})");
             keys.Add(ret.Key);
         }

@@ -94,11 +94,12 @@ public static class RestockPlanner
         IReadOnlyDictionary<string, int> freeSlotsByRetainer,
         IReadOnlyList<string>? preferredRetainers = null,
         string? sellOn = null,
-        IReadOnlyCollection<RetainerSnapshot>? retainers = null)
+        IReadOnlyCollection<RetainerSnapshot>? retainers = null, SlotPlans? plans = null,
+        IReadOnlyList<PlannedAction>? earlier = null, bool fillOnly = false, string? fillRetainer = null)
     {
         var preferred = preferredRetainers ?? Array.Empty<string>();
         var result = new List<PlannedAction>();
-        var need = targetUnits - listedUnits;
+        var need = fillOnly ? int.MaxValue : targetUnits - listedUnits;
         if (need <= 0 || unitPrice <= 0) return result;
         perListing = Math.Max(1, perListing);
         var free = freeSlotsByRetainer.ToDictionary(p => p.Key, p => p.Value);
@@ -151,6 +152,45 @@ public static class RestockPlanner
         }
 
         var indices = Enumerable.Range(0, sources.Count);
+        if (retainers?.FirstOrDefault() is { } owner && plans != null && plans.ForCharacter(owner.CharacterContentId).Any())
+        {
+            var overflow = new Dictionary<string, int>();
+            var assignment = plans.ForCharacter(owner.CharacterContentId).FirstOrDefault(r => r.Matches(itemId, isHq));
+            if (assignment != null)
+            {
+                preferred = [];
+                preferredKey = null;
+                sellOn = null;
+                firstChoice = null;
+                fullSnapshot = null;
+            }
+            foreach (var seller in retainers)
+            {
+                var layout = plans.Layout(seller, earlier);
+                var readable = seller.LastRefreshedUtc != DateTime.MinValue;
+                var capacity = free.GetValueOrDefault(seller.Key);
+                overflow[seller.Key] = readable ? Math.Min(capacity, layout.OverflowFor(itemId, isHq)) : 0;
+                var row = plans.Rows(seller.Key).FirstOrDefault(r => r.Matches(itemId, isHq));
+                if (row == null || fillRetainer != null && seller.Key != fillRetainer) continue;
+                free[seller.Key] = readable ? Math.Min(capacity, layout.ReservedFor(itemId, isHq)) : 0;
+                perListing = row.PerListing;
+                var crystal = InventoryEntry.IsCrystal(itemId);
+                int SourceOrder(int index)
+                {
+                    var source = sources[index];
+                    if (crystal && source.SourceKey.EndsWith(".bag")) return 0;
+                    if (source.FixedTargetKey == seller.Key) return 1;
+                    if (source.SourceKey.EndsWith(".bag")) return 2;
+                    return 3;
+                }
+                foreach (var i in indices.Where(i => sources[i].FixedTargetKey == seller.Key
+                    || sources[i].FixedTargetKey == null || crystal).OrderBy(SourceOrder))
+                    AddListings(i, seller.Key);
+            }
+            free = overflow;
+            if (assignment != null) perListing = assignment.PerListing;
+        }
+        if (fillOnly) return result;
         if (InventoryEntry.IsCrystal(itemId))
         {
             perListing = Math.Min(perListing, InventoryEntry.CrystalCapacity);

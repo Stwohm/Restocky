@@ -1316,7 +1316,7 @@ public sealed unsafe partial class Executor : IDisposable
                         CompleteListing(RestockSkipReason.CrystalWithdrawalFailed);
                         return;
                     }
-                    if (sellList == null || (action.StockRestock && ActiveRetainerKey() != action.RetainerKey)
+                    if (sellList == null || ((action.StockRestock || configuration.SlotPlans.Count > 0) && ActiveRetainerKey() != action.RetainerKey)
                         || unconfirmedTopUpItems.Contains((action.ItemId, action.IsHQ))
                         || (autoRestockPass && !CanAutoRestock(action)))
                     {
@@ -1655,12 +1655,29 @@ public sealed unsafe partial class Executor : IDisposable
         var market = im->GetInventoryContainer(InventoryType.RetainerMarket);
         if (market == null || (action.StockRestock && !market->IsLoaded)) return false;
         var dstSlot = -1;
-        for (var i = 0; i < Math.Min(market->Size, Planner.MaxListingSlots); i++)
+        if (configuration.SlotPlans.ContainsKey(action.RetainerKey))
         {
-            if (usedMarketSlots.Contains(i)) continue;
-            var s = market->GetInventorySlot(i);
-            if (s == null) continue;
-            if (s->ItemId == 0) { dstSlot = i; break; }
+            if (!market->IsLoaded || market->Size < Planner.MaxListingSlots) return false;
+            var live = new List<ListingEntry>();
+            for (var i = 0; i < Planner.MaxListingSlots; i++)
+            {
+                var slot = market->GetInventorySlot(i);
+                if (slot == null) return false;
+                if (slot->ItemId != 0 || usedMarketSlots.Contains(i) && !(listingRetried && i == pendingListingSlot))
+                    live.Add(new() { ListingIndex = i, ItemId = slot->ItemId,
+                        IsHQ = (slot->Flags & InventoryItem.ItemFlags.HighQuality) != 0 });
+            }
+            dstSlot = new SlotLayout(configuration.SlotPlans.Rows(action.RetainerKey), live).Destination(action.ItemId, action.IsHQ);
+            if (dstSlot < 0) return false;
+        }
+        else
+        {
+            for (var i = 0; i < Math.Min(market->Size, Planner.MaxListingSlots); i++)
+            {
+                if (usedMarketSlots.Contains(i)) continue;
+                var s = market->GetInventorySlot(i);
+                if (s != null && s->ItemId == 0) { dstSlot = i; break; }
+            }
         }
         // The previous destination may be the only free slot. Re-read it before reusing it.
         if (dstSlot < 0 && listingRetried && pendingListingSlot >= 0 && pendingListingSlot < market->Size)
@@ -2525,7 +2542,7 @@ public sealed unsafe partial class Executor : IDisposable
 
         var character = Plugin.Instance.RetainerWatcher.CaptureCharacterSnapshot(loadedOnly: active != null);
         var plans = AutoRestockPlanner.Plan(configuration.LowStock, retainers, character,
-            Plugin.Instance.Tracker.Tracker, configuration.IsHeld, AutoRestockFloor, configuration.KeepFor);
+            Plugin.Instance.Tracker.Tracker, configuration.IsHeld, AutoRestockFloor, configuration.KeepFor, configuration.SlotPlans);
         if (active != null) plans = AutoRestockPlanner.ForVisit(plans, active, retainers.First());
         foreach (var plan in plans.Where(p => p.Actions.Count == 0))
         {
