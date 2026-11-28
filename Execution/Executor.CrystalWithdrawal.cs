@@ -22,9 +22,14 @@ public sealed unsafe partial class Executor
 
     private bool IsJobSellEntry(string text)
     {
-        if (CurrentJob.Actions.FirstOrDefault()?.ListsCharacterCrystals == true)
-            return text == AddonText.TryRow(2380);
-        if (text == AddonText.TryRow(2380)) return false;
+        // Only a job that lists the retainer's own crystals needs "Sell items in your retainer's
+        // inventory" (2381). Everything else opens "Sell items in your inventory" (2380), as before
+        // 0.3.16.0: with 2381 open, character-bag listings were sometimes not accepted (TimedOut).
+        var playerEntry = AddonText.TryRow(2380);
+        var retainerCrystals = CurrentJob.Actions.Any(a => a.Kind == PlannedActionKind.NewListing
+            && InventoryEntry.IsCrystal(a.ItemId) && !a.ListsCharacterCrystals);
+        if (!retainerCrystals && !string.IsNullOrEmpty(playerEntry)) return text == playerEntry;
+        if (text == playerEntry) return false;
         return text == AddonText.TryRow(2381) || AddonText.IsHaveRetainerSellItemsEntry(text);
     }
 
