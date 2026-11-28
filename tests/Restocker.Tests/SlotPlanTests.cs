@@ -53,6 +53,72 @@ public sealed class SlotPlanTests
         Assert.Equal(15, match.Actions[0].ListingIndex);
     }
 
+    [Fact]
+    public void Clicked_slots_share_quantity_and_last_removal_restores_stock_defaults()
+    {
+        var seller = Seller(1, "RetainerA");
+        var entry = new LowStockEntry { ItemId = 8, Target = 300, PerListing = 50, PreferredRetainers = { [1] = "RetainerB" } };
+        var config = new StockTrackingConfiguration { LowStock = [entry] };
+        var plans = config.SlotPlans;
+        var crystal = new SlotPlanRow(8, false, 1, 2000);
+        Assert.True(plans.TryEditSlot(seller, 17, crystal, out _));
+        Assert.True(plans.TryEditSlot(seller, 4, crystal, out _));
+        Assert.Equal(2, Assert.Single(plans.Rows(seller.Key)).Slots);
+        Assert.Equal(4000, plans.Target(1, 8, false));
+        Assert.True(plans.TryEditSlot(seller, 17, crystal with { PerListing = 9999 }, out _));
+        var row = Assert.Single(plans.Rows(seller.Key));
+        Assert.Equal(9999, row.PerListing);
+        Assert.Equal(new[] { 4, 17 }, row.Positions);
+        Assert.False(plans.TryEditSlot(seller, 4, crystal with { PerListing = 10000 }, out _));
+        Assert.True(plans.TryEditSlot(seller, 4, null, out _));
+        Assert.Equal(9999, plans.Target(1, 8, false));
+        Assert.True(plans.TryEditSlot(seller, 17, null, out _));
+        Assert.Empty(plans);
+        Assert.Equal(0, plans.Target(1, 8, false));
+        Assert.Equal((300, 50, "RetainerB"), (entry.Target, entry.PerListing, entry.PreferredRetainers[1]));
+    }
+
+    [Fact]
+    public void Full_board_allows_replacement_and_refuses_a_twenty_first_slot()
+    {
+        var seller = Seller(1, "RetainerA", 20);
+        var plans = new SlotPlans();
+        var row = new SlotPlanRow(Item, false, 1, 2);
+        for (var i = 0; i < 20; i++) Assert.True(plans.TryEditSlot(seller, i, row, out _));
+        Assert.False(plans.TryEditSlot(seller, 20, row, out var reason));
+        Assert.Contains("20", reason);
+        var blocked = plans.Layout(seller).DisplaySlots()[12];
+        Assert.True(blocked.Blocking);
+        var actual = blocked.Listing!;
+        Assert.True(plans.TryEditSlot(seller, 12, new(actual.ItemId, actual.IsHQ, 1, actual.Quantity), out _));
+        Assert.Equal(19, plans.Rows(seller.Key)[0].Slots);
+        Assert.True(plans.Layout(seller).DisplaySlots()[12].Filled);
+    }
+
+    [Fact]
+    public void Legacy_positions_are_pinned_on_edit_and_survive_reload_and_market_reordering()
+    {
+        var seller = Seller(1, "RetainerA", 3);
+        seller.Listings[1].ItemId = Item;
+        var plans = new SlotPlans { [seller.Key] = [new(Item, false, 2, 3)] };
+        var legacy = plans.Layout(seller).DisplaySlots();
+        Assert.True(legacy[1].Filled);
+        Assert.NotNull(legacy[3].Plan);
+        Assert.True(plans.TryEditSlot(seller, 18, new(Other, true, 1, 5), out _));
+        plans = JsonSerializer.Deserialize<SlotPlans>(JsonSerializer.Serialize(plans))!;
+        seller.Listings[1].ListingIndex = 9;
+        seller.Listings[0].ItemId = Other;
+        seller.Listings[0].IsHQ = true;
+        var layout = plans.Layout(seller);
+        var display = layout.DisplaySlots();
+        Assert.Equal(new[] { 1, 3 }, display.Where(s => s.Plan?.ItemId == Item).Select(s => s.Index));
+        Assert.Equal(9, Assert.Single(display, s => s.Filled && s.Plan!.ItemId == Item).Listing!.ListingIndex);
+        Assert.True(display[18].Filled);
+        Assert.Equal(0, display[18].Listing!.ListingIndex);
+        Assert.Equal(3, display.Count(s => s.Listing != null));
+        Assert.Null(layout.Slots[layout.Destination(Item, false)].Listing);
+    }
+
     [Theory]
     [InlineData(100u, false)]
     [InlineData(8u, true)]

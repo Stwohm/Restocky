@@ -7,6 +7,7 @@ namespace Restocker.Plan;
 
 public sealed record SlotPlanRow(uint ItemId, bool IsHq, int Slots, int PerListing)
 {
+    public int[]? Positions { get; init; }
     internal bool Matches(uint id, bool hq) => ItemId == id && IsHq == hq;
 }
 
@@ -43,6 +44,30 @@ public sealed class SlotPlans : Dictionary<string, List<SlotPlanRow>>
             actual.Add(new() { ListingIndex = index, ItemId = action.ItemId, IsHQ = action.IsHQ });
         }
         return new(Rows(seller.Key), actual);
+    }
+
+    internal bool TryEditSlot(RetainerSnapshot seller, int index, SlotPlanRow? selection, out string? reason)
+    {
+        if (index < 0 || index >= Planner.MaxListingSlots)
+        {
+            reason = "A retainer has only 20 market slots.";
+            return false;
+        }
+        // The first edit of a legacy plan pins its currently visible reservations too.
+        var cells = Layout(seller).DisplaySlots();
+        cells[index] = cells[index] with { Plan = selection };
+        var rows = new List<SlotPlanRow>();
+        // Preserve plan order, which also determines allocation when the market is full.
+        foreach (var row in Rows(seller.Key).Concat(selection == null ? [] : new[] { selection })
+                     .DistinctBy(r => (r.ItemId, r.IsHq)))
+        {
+            var positions = cells.Where(s => s.Plan?.Matches(row.ItemId, row.IsHq) == true)
+                .Select(s => s.Index).ToArray();
+            if (positions.Length == 0) continue;
+            var qty = selection?.Matches(row.ItemId, row.IsHq) == true ? selection.PerListing : row.PerListing;
+            rows.Add(row with { Slots = positions.Length, Positions = positions, PerListing = qty });
+        }
+        return TrySave(seller.Key, rows, out reason);
     }
 }
 
@@ -81,6 +106,34 @@ internal sealed class SlotLayout
     }
 
     internal int ReservedFor(uint id, bool hq) => Slots.Count(s => s.Listing == null && s.Plan?.Matches(id, hq) == true);
+
+    // Only the board projects physical slots onto display positions. Destination and
+    // market lookups keep using the game's actual indices.
+    internal BoardSlot[] DisplaySlots()
+    {
+        var result = new BoardSlot[Slots.Length];
+        var placed = new bool[Slots.Length];
+        void Place(BoardSlot source, int position)
+        {
+            result[position] = source with { Index = position };
+            placed[source.Index] = true;
+        }
+        foreach (var group in Slots.Where(s => s.Plan?.Positions != null).GroupBy(s => s.Plan!))
+        {
+            var positions = group.Key.Positions!;
+            if (positions.Length != group.Count() || positions.Distinct().Count() != positions.Length
+                || positions.Any(i => i < 0 || i >= Slots.Length || result[i] != null))
+                return Slots.ToArray();
+            foreach (var slot in group.Where(s => positions.Contains(s.Index))) Place(slot, slot.Index);
+            foreach (var (slot, position) in group.Where(s => !placed[s.Index]).Zip(positions.Where(i => result[i] == null)))
+                Place(slot, position);
+        }
+        foreach (var slot in Slots.Where(s => !placed[s.Index] && result[s.Index] == null)) Place(slot, slot.Index);
+        foreach (var (slot, position) in Slots.Where(s => !placed[s.Index])
+                     .Zip(Enumerable.Range(0, Slots.Length).Where(i => result[i] == null)))
+            Place(slot, position);
+        return result;
+    }
     internal bool Assigned(uint id, bool hq) => Slots.Any(s => s.Plan?.Matches(id, hq) == true);
     internal int OverflowFor(uint id, bool hq) => Assigned(id, hq) ? 0 : Free;
     internal int Destination(uint id, bool hq)
