@@ -97,9 +97,17 @@ public sealed unsafe class RetainerWatcher : IDisposable
             CharacterName = localPlayer?.Name.TextValue ?? string.Empty,
             RetainerId = active->RetainerId,
             RetainerName = active->NameString,
+            Gil = active->Gil,
             WorldId = localPlayer?.HomeWorld.RowId ?? 0,
             LastRefreshedUtc = DateTime.UtcNow,
         };
+        for (uint i = 0; i < retainerManager->GetRetainerCount(); i++)
+        {
+            var retainer = retainerManager->GetRetainerBySortedIndex(i);
+            if (retainer == null || retainer->RetainerId != active->RetainerId) continue;
+            snapshot.DisplayOrder = (int)i;
+            break;
+        }
         snapshot.Key = RetainerSnapshot.MakeKey(snapshot.CharacterContentId, snapshot.RetainerId);
         snapshot.Listings = ReadListings(out var marketLoaded);
         if (!marketLoaded) return null;

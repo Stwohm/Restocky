@@ -79,20 +79,28 @@ public sealed class LowStockService : IDisposable
             stock[key] = (count.Listed + listing.Quantity, count.Available, count.Provisional || listing.MissingSinceUtc != null);
         }
 
-        var inventory = configuration.Snapshots.Values.SelectMany(s => s.Inventory)
-            .Concat(configuration.Characters.Values.SelectMany(c => c.Bag.Concat(c.Saddlebag).Concat(c.PremiumSaddlebag)));
-        foreach (var item in inventory.Where(i => i.IsListable))
+        foreach (var item in configuration.Snapshots.Values.SelectMany(s => s.Inventory).Where(i => i.IsListable))
+            AddAvailable((item.ItemId, item.IsHQ), item.Quantity);
+        foreach (var character in configuration.Characters.Values)
         {
-            var key = (item.ItemId, item.IsHQ);
-            var count = stock.GetValueOrDefault(key);
-            stock[key] = (count.Listed, count.Available + item.Quantity, count.Provisional);
+            var groups = character.Bag.Concat(character.Saddlebag).Concat(character.PremiumSaddlebag)
+                .Where(i => i.IsListable).GroupBy(i => (i.ItemId, i.IsHQ));
+            foreach (var group in groups)
+                AddAvailable(group.Key, InventoryReserve.Available(group.Sum(i => i.Quantity),
+                    configuration.KeepFor(group.Key.ItemId, group.Key.IsHQ)));
         }
         return stock;
+
+        void AddAvailable((uint, bool) key, int quantity)
+        {
+            var count = stock.GetValueOrDefault(key);
+            stock[key] = (count.Listed, count.Available + quantity, count.Provisional);
+        }
     }
 
     public List<RestockSource> Sources(uint itemId, bool hq)
         => AutoRestockPlanner.Sources(itemId, hq, MyRetainers(),
-            configuration.Characters.GetValueOrDefault(CharacterSnapshot.MakeKey(Cid())));
+            configuration.Characters.GetValueOrDefault(CharacterSnapshot.MakeKey(Cid())), configuration.KeepFor(itemId, hq));
 
     public int PerListing(LowStockEntry e)
         => RestockPlanner.PerListing(e, tracker.ActiveFor(e.ItemId, e.IsHq, MyRetainers().Select(r => r.Key).ToHashSet())
@@ -112,12 +120,17 @@ public sealed class LowStockService : IDisposable
             configuration.UndercutGil, configuration.EffectiveFloorFor(e.ItemId, e.IsHq, costLedger).Price) ?? default;
     }
 
+    internal long EffectiveFloor(uint id, bool hq) => configuration.EffectiveFloorFor(id, hq, costLedger).Price;
+
+    internal StockReading Freshness(DateTime stamp, DateTime now)
+        => new StockFreshness(now, loginUtc, Math.Max(1, configuration.StockMaxAgeHours)).Count(0, stamp);
+
     internal unsafe RetainerSnapshot[] CurrentRetainers()
     {
         var cid = Cid();
         if (cid == 0) return [];
         var manager = RetainerManager.Instance();
-        if (manager == null || !manager->IsReady) return MyRetainers().OrderBy(r => r.RetainerName).ToArray();
+        if (manager == null || !manager->IsReady) return MyRetainers().OrderBy(r => r.DisplayOrder ?? int.MaxValue).ThenBy(r => r.RetainerName).ToArray();
 
         var retainers = new List<RetainerSnapshot>();
         for (uint i = 0; i < manager->GetRetainerCount(); ++i)
@@ -181,7 +194,7 @@ public sealed class LowStockService : IDisposable
 
         var character = configuration.Characters.GetValueOrDefault(CharacterSnapshot.MakeKey(Cid()));
         var plan = AutoRestockPlanner.Plan(configuration.LowStock, retainers, character, tracker, configuration.IsHeld,
-                (id, hq) => configuration.EffectiveFloorFor(id, hq, costLedger).Price)
+                (id, hq) => configuration.EffectiveFloorFor(id, hq, costLedger).Price, configuration.KeepFor)
             .Find(p => p.ItemId == entry.ItemId && p.IsHq == entry.IsHq);
         if (plan == null) return $"{Strings.StockCycleEnoughListed}\n{Strings.StockCycleSnapshot}";
         if (plan.Actions.Count == 0)

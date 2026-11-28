@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
@@ -41,12 +42,25 @@ public sealed unsafe partial class Executor
         return false;
     }
 
+    private int LiveCharacterAllowance(InventoryManager* im, PlannedAction action, int? beforeTransfer = null)
+    {
+        var keep = configuration.KeepFor(action.ItemId, action.IsHQ);
+        if (keep == 0) return int.MaxValue;
+        var containers = InventoryEntry.IsCrystal(action.ItemId) ? RetainerWatcher.PlayerCrystals
+            : CombineUnique(CharBagContainers, SaddleContainers);
+        // A closed/unloaded saddlebag cannot prove that the reserve is present.
+        var held = ReadTopUpStacks(im, containers, action).Values.Sum();
+        return InventoryReserve.AfterTransfer(held, keep, beforeTransfer ?? action.CharacterBeforeCrystalWithdrawal);
+    }
+
     private InventoryType[] ListingSourceContainers(PlannedAction action)
     {
         var key = string.IsNullOrEmpty(action.SourceKey) ? action.RetainerKey : action.SourceKey;
         if (InventoryEntry.IsCrystal(action.ItemId))
             return action.ListsCharacterCrystals || key.StartsWith("char.") ? RetainerWatcher.PlayerCrystals : RetainerWatcher.RetainerCrystals;
-        return autoRestockPass || (action.StockRestock && jobs.Exists(j => j.HasTopUpFor(action))) ? SourceContainersFor(key) : ResolveSearchOrder(key);
+        var fixedSource = autoRestockPass || configuration.KeepFor(action.ItemId, action.IsHQ) > 0
+            || (action.StockRestock && jobs.Exists(j => j.HasTopUpFor(action)));
+        return fixedSource ? SourceContainersFor(key) : ResolveSearchOrder(key);
     }
 
     private static bool IsListingSource(InventoryItem* item, PlannedAction action)

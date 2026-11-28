@@ -38,7 +38,9 @@ public sealed class PlannedAction
     internal bool StockRestock { get; init; }
     internal bool NeedsCrystalWithdrawal => StockRestock && InventoryEntry.IsCrystal(ItemId)
         && SourceKey != RetainerKey && !SourceKey.StartsWith("char.");
-    internal bool ListsCharacterCrystals => StockRestock && InventoryEntry.IsCrystal(ItemId) && SourceKey != RetainerKey;
+    internal bool ListsCharacterCrystals => Kind == PlannedActionKind.NewListing && InventoryEntry.IsCrystal(ItemId)
+        && (NeedsCrystalWithdrawal || SourceKey.StartsWith("char."));
+    internal int? CharacterBeforeCrystalWithdrawal { get; set; }
     internal bool ResolveRestockPrice { get; set; }
     internal Restocker.Plan.RestockPrice? RestockPrice { get; set; }
     internal Restocker.Plan.StackTopUp? TopUp { get; init; }

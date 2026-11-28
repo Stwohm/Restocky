@@ -9,6 +9,18 @@ public class StockTrackingConfiguration
 {
     public List<LowStockEntry> LowStock { get; set; } = new();
     public StockCategories StockCategories { get; set; } = new();
+    public Dictionary<string, int> InventoryReserves { get; set; } = new();
+    public bool ShowRetainerBoard { get; set; }
+
+    internal int KeepFor(uint itemId, bool hq)
+        => Math.Max(0, InventoryReserves.GetValueOrDefault($"{itemId}:{(hq ? 1 : 0)}"));
+
+    internal void SetKeep(uint itemId, bool hq, int units)
+    {
+        var key = $"{itemId}:{(hq ? 1 : 0)}";
+        if (units > 0) InventoryReserves[key] = units;
+        else InventoryReserves.Remove(key);
+    }
 }
 
 public sealed class StockCategory

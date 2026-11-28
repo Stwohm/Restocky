@@ -29,7 +29,7 @@ internal static class StackTopUpPlanner
             if (InventoryEntry.IsCrystal(itemId))
             {
                 // Withdraw to the same crystal balance that supplies the addition.
-                var source = remaining.Where(s => s.Available > 0 && s.Available <= inventoryStackSize - listing.Quantity
+                var source = remaining.Where(s => s.Available > 0 && s.Available + s.Reserved <= inventoryStackSize - listing.Quantity
                     && (s.FixedTargetKey == retainerKey || s.SourceKey.EndsWith(".bag")))
                     .OrderBy(s => s.FixedTargetKey != null).FirstOrDefault();
                 if (source == null) continue;

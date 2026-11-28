@@ -19,6 +19,8 @@ public sealed class RetainerSnapshot
     public string CharacterName { get; set; } = string.Empty;
 
     public ulong RetainerId { get; set; }
+    public uint? Gil { get; set; }
+    public int? DisplayOrder { get; set; }
     public string RetainerName { get; set; } = string.Empty;
 
     /// <summary>所属ワールド ID。別ワールドリテイナーは現在ログイン中のキャラから召喚不能。</summary>

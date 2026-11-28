@@ -14,7 +14,7 @@ using Restocker.Plan;
 namespace Restocker.Windows;
 
 /// <summary>Fork: watched items, their listed / available units, alert threshold and a Restock button.</summary>
-public sealed class LowStockTab
+public sealed partial class LowStockTab
 {
     private readonly Configuration configuration;
     private readonly Executor executor;
@@ -47,10 +47,20 @@ public sealed class LowStockTab
 
     public void Draw()
     {
+        if (ImGui.Button(configuration.ShowRetainerBoard ? "Stock list" : "Retainer board"))
+        {
+            configuration.ShowRetainerBoard = !configuration.ShowRetainerBoard;
+            configuration.Save();
+        }
+        if (configuration.ShowRetainerBoard)
+        {
+            DrawBoard();
+            return;
+        }
         var bellOpen = AddonHelper.IsOpen("RetainerList");
         var ready = bellOpen && !executor.IsRunning;
         ImGui.SetNextItemWidth(ImGui.GetFontSize() * 9);
-        ImGui.InputTextWithHint("##stock-search", "Find or watch item", ref search, 64);
+        if (ImGui.InputTextWithHint("##stock-search", "Find or watch item", ref search, 64)) focusedItem = null;
         ImGui.SameLine();
         ImGui.Checkbox(Strings.StockOnlyLow, ref onlyLow);
         ImGui.SameLine();
@@ -155,7 +165,7 @@ public sealed class LowStockTab
                 .Concat(s.Inventory.Select(i => (i.ItemId, i.IsHQ))))
             .Concat(configuration.Characters.Values.SelectMany(c => c.Bag.Concat(c.Saddlebag).Concat(c.PremiumSaddlebag)
                 .Where(i => i.IsListable).Select(i => (i.ItemId, i.IsHQ))))
-            .Distinct()
+            .Distinct().Where(k => focusedItem == null || focusedItem == k)
             .Select(k => (k.ItemId, k.IsHQ, Name: ItemName(k.ItemId)))
             .Where(k => k.Name.Contains(search, StringComparison.OrdinalIgnoreCase))
             .Where(k => !configuration.LowStock.Any(e => e.ItemId == k.ItemId && e.IsHq == k.IsHQ))
@@ -168,6 +178,7 @@ public sealed class LowStockTab
                 configuration.LowStock.Add(new LowStockEntry { ItemId = k.ItemId, IsHq = k.IsHQ });
                 configuration.Save();
                 search = string.Empty;
+                focusedItem = null;
             }
         }
         if (known.Count == 0 && !configuration.LowStock.Any(e => ItemName(e.ItemId).Contains(search, StringComparison.OrdinalIgnoreCase))) ImGui.TextDisabled("no match among items on your retainers / bag / saddlebag (open the bell once to refresh)");
@@ -182,7 +193,8 @@ public sealed class LowStockTab
         }
         var retainers = service.CurrentRetainers();
         var cid = Plugin.PlayerState.ContentId;
-        var rows = configuration.LowStock.Where(e => e.MatchesTags(kindFilter, statusFilter))
+        var rows = configuration.LowStock.Where(e => e.MatchesTags(kindFilter, statusFilter)
+                && (focusedItem == null || focusedItem == (e.ItemId, e.IsHq)))
             .Select(e => (Entry: e, Name: ItemName(e.ItemId), Listed: service.ListedUnits(e.ItemId, e.IsHq)))
             .Where(r => r.Name.Contains(search, StringComparison.OrdinalIgnoreCase) && (!onlyLow || r.Entry.IsLow(r.Listed)))
             .OrderByDescending(r => r.Entry.Enabled).ThenByDescending(r => r.Entry.IsLow(r.Listed))
@@ -208,7 +220,7 @@ public sealed class LowStockTab
             var count = group.Count();
             var category = configuration.StockCategories.Ordered.Find(c => c.Id == categoryId);
             if (count == 0 && (search.Length > 0 || onlyLow || statusFilter != StockStatus.None || kindFilter != StockKind.None)) continue;
-            var collapsed = category?.Collapsed ?? configuration.StockCategories.UncategorizedCollapsed;
+            var collapsed = focusedItem == null && (category?.Collapsed ?? configuration.StockCategories.UncategorizedCollapsed);
             ImGui.TableNextRow();
             ImGui.TableNextColumn();
             if (ImGui.Selectable($"{(collapsed ? ">" : "v")} {CategoryLabel(categoryId)} ({count}, {group.Count(r => r.Entry.IsLow(r.Listed))} low)###group-{categoryId}"))
@@ -289,7 +301,8 @@ public sealed class LowStockTab
                 ImGui.TextColored(new Vector4(.8f, .7f, .9f, 1), $"[{Strings.StockTag(e.Status)}]");
             }
             ImGui.TableNextColumn();
-            RightAligned($"{StockTotal(listings)} / {StockTotal(inventory)}");
+            var stock = FormatSupply(e, inventory);
+            RightAligned($"{StockTotal(listings)} / {stock.Available}");
             hover |= ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled);
             if (hover)
             {
@@ -302,7 +315,7 @@ public sealed class LowStockTab
                     ImGui.PopTextWrapPos();
                 }
                 ImGui.Separator();
-                ImGui.TextUnformatted(Strings.StockCountsHint);
+                ImGui.TextUnformatted(stock.Detail);
                 foreach (var source in inventory.Concat(listings)) ImGui.TextUnformatted(DescribeStock(source));
                 ImGui.TextDisabled(Strings.StockFreshCounts);
                 if (listings.Any(r => r.Provisional)) ImGui.TextDisabled(Strings.StockProvisional);
@@ -391,6 +404,7 @@ public sealed class LowStockTab
         var threshold = e.Threshold;
         if (ImGui.InputInt(Strings.StockThreshold, ref threshold, 0)) { e.Threshold = Math.Max(0, threshold); configuration.Save(); }
         if (ImGui.InputInt(Strings.StockTarget, ref to, 0)) { e.Target = Math.Max(0, to); configuration.Save(); }
+        ListTab.DrawKeep(configuration, e.ItemId, e.IsHq, "Keep in inventory");
         var per = e.PerListing;
         if (ImGui.InputInt(Strings.StockPerListing, ref per, 0)) { e.PerListing = Math.Max(0, per); configuration.Save(); }
         if (ImGui.IsItemHovered()) ImGui.SetTooltip($"0 = same as your current listings ({service.PerListing(e):N0})");
@@ -461,12 +475,22 @@ public sealed class LowStockTab
                 : bellOpen ? "Fetch live market prices from the retainer that lists it" : "open the summoning bell first");
     }
 
-    private static string StockTotal(IReadOnlyCollection<StockSourceReading> sources)
+    private (string Available, string Detail) FormatSupply(LowStockEntry item, List<StockSourceReading> inventory)
+    {
+        var character = inventory.Take(InventoryEntry.IsCrystal(item.ItemId) ? 1 : 3).ToList();
+        var keep = configuration.KeepFor(item.ItemId, item.IsHq);
+        var held = StockFreshness.Total(character.Select(s => s.Reading)).Units;
+        var reserved = Math.Min(keep, held ?? 0);
+        var available = StockTotal(inventory, reserved);
+        return (available, $"Character held {StockTotal(character)} · Keep {keep:N0} · Character available {StockTotal(character, reserved)}\nAvailable including retainers {available}");
+    }
+
+    private static string StockTotal(IReadOnlyCollection<StockSourceReading> sources, int reserved = 0)
     {
         var (units, incomplete) = StockFreshness.Total(sources.Select(s => s.Reading));
         if (units == null) return "?";
         var marker = incomplete ? "!" : sources.Any(s => s.Provisional) ? "?" : string.Empty;
-        return $"{units:N0}{marker}";
+        return $"{units - reserved:N0}{marker}";
     }
 
     private static string DescribeStock(StockSourceReading source)

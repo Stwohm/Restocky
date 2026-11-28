@@ -78,13 +78,13 @@ public sealed class ListTab
 
     private void DrawApplyButton()
     {
-        var totalActions = pendingPlans.Sum(p => ExpandPlanToActions(p).Count);
+        var totalActions = ExpandPending().Count;
         var disabled = totalActions == 0 || executor.IsRunning;
         if (disabled) ImGui.BeginDisabled();
         if (ImGui.Button(string.Format(Strings.ApplyWithCount, Strings.Apply, totalActions)))
         {
             Plugin.Instance?.RetainerWatcher.CaptureCharacterSnapshot();
-            var actions = pendingPlans.SelectMany(ExpandPlanToActions).ToList();
+            var actions = ExpandPending();
             confirmDialog.Request(actions, list =>
             {
                 executor.StartApplyActions(list);
@@ -103,7 +103,15 @@ public sealed class ListTab
     }
 
     /// <summary>1 つの PendingPlan を実行可能な PlannedAction list に展開。</summary>
-    private List<PlannedAction> ExpandPlanToActions(PendingPlan p)
+    private List<PlannedAction> ExpandPending()
+    {
+        var actions = new List<PlannedAction>();
+        foreach (var plan in pendingPlans)
+            actions.AddRange(ExpandPlanToActions(plan, actions));
+        return actions;
+    }
+
+    private List<PlannedAction> ExpandPlanToActions(PendingPlan p, List<PlannedAction> earlier)
     {
         if (!configuration.Snapshots.TryGetValue(p.TargetKey, out var target)) return new List<PlannedAction>();
 
@@ -114,23 +122,9 @@ public sealed class ListTab
                 new[] { srcSnap }, p.ItemId, p.IsHQ, p.UnitPrice, p.MaxStack,
                 listingsCap: p.Slots, perListingQty: p.QtyPer);
         }
-        var inv = ResolveCharSourceInventory(p.SourceKey);
-        if (inv == null) return new List<PlannedAction>();
-        return Planner.PlanFromInventoryList(
-            inv, p.SourceKey, target, p.ItemId, p.IsHQ, p.UnitPrice, p.MaxStack,
-            listingsCap: p.Slots, perListingQty: p.QtyPer);
-    }
-
-    private List<InventoryEntry>? ResolveCharSourceInventory(string sourceKey)
-    {
-        // sourceKey: "char.{contentId:X}.bag" or "char.{contentId:X}.saddle"
-        foreach (var ch in configuration.Characters.Values)
-        {
-            var prefix = CharacterSnapshot.MakeKey(ch.CharacterContentId);
-            if (sourceKey == prefix + ".bag") return ch.Bag;
-            if (sourceKey == prefix + ".saddle") return ch.Saddlebag.Concat(ch.PremiumSaddlebag).ToList();
-        }
-        return null;
+        if (!configuration.Characters.TryGetValue(CharacterSnapshot.MakeKey(target.CharacterContentId), out var character)) return [];
+        return Planner.PlanCharacterSource(character, p.SourceKey, target, p.ItemId, p.IsHQ, p.UnitPrice,
+            p.MaxStack, p.Slots, p.QtyPer, configuration.KeepFor(p.ItemId, p.IsHQ), earlier);
     }
 
     private (int? qtyPer, int? slots) ResolveLots(string priceKey)
@@ -329,11 +323,12 @@ public sealed class ListTab
             ImGuiTableFlags.NoSavedSettings;
 
         // Item, Owned, (Listed), MaxStack, Price, LotsConfig, Target, AddBtn = 7 or 8
-        var cols = isRetainerSource ? 8 : 7;
+        var cols = isRetainerSource ? 9 : 8;
         if (!ImGui.BeginTable($"##list-table-{sourceKey}", cols, flags)) return;
 
         ImGui.TableSetupColumn(Strings.ColItem, ImGuiTableColumnFlags.WidthStretch, 0.35f);
         ImGui.TableSetupColumn(Strings.ColOwned, ImGuiTableColumnFlags.WidthFixed, 60);
+        ImGui.TableSetupColumn("Keep", ImGuiTableColumnFlags.WidthFixed, 55);
         if (isRetainerSource)
             ImGui.TableSetupColumn(Strings.ColListed, ImGuiTableColumnFlags.WidthFixed, 60);
         ImGui.TableSetupColumn(Strings.ColMaxStack, ImGuiTableColumnFlags.WidthFixed, 70);
@@ -352,6 +347,9 @@ public sealed class ListTab
 
             ImGui.TableNextColumn();
             ImGui.TextUnformatted(r.Qty.ToString());
+            ImGui.TableNextColumn();
+            ImGui.SetNextItemWidth(-1);
+            DrawKeep(configuration, r.ItemId, r.IsHQ, $"##keep-{MakePriceKey(sourceKey, r.ItemId, r.IsHQ)}");
 
             if (isRetainerSource)
             {
@@ -376,6 +374,17 @@ public sealed class ListTab
         }
 
         ImGui.EndTable();
+    }
+
+    internal static void DrawKeep(Configuration config, uint id, bool hq, string label)
+    {
+        var keep = config.KeepFor(id, hq);
+        if (ImGui.InputInt(label, ref keep, 0))
+        {
+            config.SetKeep(id, hq, keep);
+            config.Save();
+        }
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Units to keep on your character across bag and saddlebags. Retainer stock is separate.");
     }
 
     private void DrawPriceCell(string sourceKey, Row r)
@@ -443,7 +452,8 @@ public sealed class ListTab
         }
 
         var key = MakePriceKey(sourceKey, r.ItemId, r.IsHQ);
-        var retainers = configuration.Snapshots.Values.OrderBy(s => s.RetainerName).ToList();
+        var retainers = configuration.Snapshots.Values.Where(s => sourceKey.StartsWith(CharacterSnapshot.MakeKey(s.CharacterContentId) + "."))
+            .OrderBy(s => s.RetainerName).ToList();
         if (retainers.Count == 0)
         {
             ImGui.TextDisabled(Strings.CharBagNeedRetainerSnapshot);

@@ -12,6 +12,7 @@ namespace Restocker.Plan;
 public sealed record RestockSource(string SourceKey, string? FixedTargetKey, int Available)
 {
     internal int MaxPerListing { get; init; } = int.MaxValue;
+    internal int Reserved { get; init; }
 }
 
 /// <summary>A low-stock watch entry (persisted in Configuration).</summary>

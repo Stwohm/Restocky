@@ -16,7 +16,8 @@ internal static class AutoRestockPlanner
 {
     internal static List<AutoRestockPlan> Plan(
         IEnumerable<LowStockEntry> entries, IReadOnlyCollection<RetainerSnapshot> retainers, CharacterSnapshot? character,
-        ListingTracker tracker, Func<uint, bool, bool> isHeld, Func<uint, bool, long> floorFor)
+        ListingTracker tracker, Func<uint, bool, bool> isHeld, Func<uint, bool, long> floorFor,
+        Func<uint, bool, int>? keepFor = null)
     {
         var plans = new List<AutoRestockPlan>();
         var keys = retainers.Select(r => r.Key).ToHashSet();
@@ -47,7 +48,7 @@ internal static class AutoRestockPlanner
                 continue;
             }
 
-            var sources = Sources(itemId, hq, retainers, character);
+            var sources = Sources(itemId, hq, retainers, character, keepFor?.Invoke(itemId, hq) ?? 0);
             var actions = RestockPlanner.Plan(itemId, hq, entry.Target, listedUnits,
                 RestockPlanner.PerListing(entry, existing.Select(l => l.Quantity)), price, sources, free,
                 preferences, sellOn, retainers);
@@ -98,7 +99,7 @@ internal static class AutoRestockPlanner
     }
 
     internal static List<RestockSource> Sources(uint itemId, bool hq, IEnumerable<RetainerSnapshot> retainers,
-        CharacterSnapshot? character)
+        CharacterSnapshot? character, int keep = 0)
     {
         var sources = new List<RestockSource>();
         foreach (var retainer in retainers)
@@ -109,6 +110,7 @@ internal static class AutoRestockPlanner
             Add(character.Bag, prefix + ".bag", null);
             Add(character.Saddlebag.Concat(character.PremiumSaddlebag), prefix + ".saddle", null);
         }
+        InventoryReserve.Apply(sources, keep);
         return sources;
 
         void Add(IEnumerable<InventoryEntry> inventory, string sourceKey, string? fixedTarget)

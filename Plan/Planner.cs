@@ -115,7 +115,9 @@ public static class Planner
         long unitPrice,
         int maxStackPerListing,
         int? listingsCap = null,
-        int? perListingQty = null)
+        int? perListingQty = null,
+        int alreadyPlanned = 0,
+        int availableForCharacter = int.MaxValue)
     {
         var result = new List<PlannedAction>();
         if (maxStackPerListing <= 0) return result;
@@ -125,7 +127,8 @@ public static class Planner
             ? Math.Min(perListingQty.Value, maxStackPerListing)
             : maxStackPerListing;
 
-        var owned = inventory.Where(e => e.ItemId == itemId && e.IsHQ == isHQ).Sum(e => e.Quantity);
+        var held = inventory.Where(e => e.ItemId == itemId && e.IsHQ == isHQ).Sum(e => e.Quantity);
+        var owned = Math.Min(Math.Max(0, held - alreadyPlanned), availableForCharacter);
         if (owned <= 0) return result;
 
         var freeSlots = MaxListingSlots - targetRetainer.Listings.Count;
@@ -150,7 +153,7 @@ public static class Planner
             remaining -= qtyPer;
             slotsLeft--;
         }
-        if (!listingsCap.HasValue && remaining > 0 && slotsLeft > 0)
+        if ((!listingsCap.HasValue || availableForCharacter < held - alreadyPlanned) && remaining > 0 && slotsLeft > 0)
         {
             result.Add(new PlannedAction
             {
@@ -166,14 +169,35 @@ public static class Planner
         return result;
     }
 
+    internal static List<PlannedAction> PlanCharacterSource(CharacterSnapshot character, string sourceKey,
+        RetainerSnapshot target, uint itemId, bool hq, long price, int maxStack, int? slots, int? qty,
+        int keep, IReadOnlyList<PlannedAction> earlier)
+    {
+        var prefix = CharacterSnapshot.MakeKey(character.CharacterContentId) + ".";
+        var saddle = character.Saddlebag.Concat(character.PremiumSaddlebag);
+        var source = sourceKey == prefix + "bag" ? character.Bag : sourceKey == prefix + "saddle" ? saddle : null;
+        if (source == null) return [];
+        var budget = int.MaxValue;
+        var planned = 0;
+        if (keep > 0)
+        {
+            var held = character.Bag.Concat(saddle).Where(i => i.IsListable && i.ItemId == itemId && i.IsHQ == hq).Sum(i => i.Quantity);
+            var previous = earlier.Where(a => a.ItemId == itemId && a.IsHQ == hq && a.SourceKey.StartsWith(prefix)).ToList();
+            budget = InventoryReserve.Available(held, keep) - previous.Sum(a => a.Quantity);
+            planned = previous.Where(a => a.SourceKey == sourceKey).Sum(a => a.Quantity);
+        }
+        return PlanFromInventoryList(source, sourceKey, target, itemId, hq, price, maxStack, slots, qty, planned, budget);
+    }
+
     /// <summary>後方互換: <see cref="PlanFromInventoryList"/> のキャラバッグ版エイリアス。</summary>
     public static List<PlannedAction> PlanCharacterListings(
         Restocker.Data.CharacterSnapshot character,
         RetainerSnapshot targetRetainer,
-        uint itemId, bool isHQ, long unitPrice, int maxStackPerListing)
-        => PlanFromInventoryList(character.Bag,
-            Restocker.Data.CharacterSnapshot.MakeKey(character.CharacterContentId),
-            targetRetainer, itemId, isHQ, unitPrice, maxStackPerListing);
+        uint itemId, bool isHQ, long unitPrice, int maxStackPerListing, int keep = 0)
+        => PlanFromInventoryList(character.Bag, CharacterSnapshot.MakeKey(character.CharacterContentId),
+            targetRetainer, itemId, isHQ, unitPrice, maxStackPerListing, availableForCharacter: keep <= 0 ? int.MaxValue
+                : InventoryReserve.Available(character.Bag.Where(i => i.ItemId == itemId && i.IsHQ == isHQ)
+                    .Sum(i => i.Quantity), keep));
 
     /// <summary>
     /// 計画と実際の保有量の差分から「あふれて出品できなかった個数」を計算する。

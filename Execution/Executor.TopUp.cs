@@ -63,6 +63,7 @@ public sealed unsafe partial class Executor
                 && action.Quantity <= InventoryEntry.CrystalCapacity
             : FindTopUpBagRoom(im, balances, topUp.InventoryStackSize, topUp.OriginalQuantity) != null;
         if (!containers.All(t => IsTopUpContainerLoaded(im, t)) || !hasRoom || available < required
+            || topUp.BagUnits + topUp.SaddleUnits > LiveCharacterAllowance(im, action)
             || (!crystal && topUp.RetainerUnits > 0
                 && ReadTopUpStacks(im, RetainerInventoryContainersStatic, action).Values.Sum() < topUp.RetainerUnits))
         {
@@ -189,6 +190,12 @@ public sealed unsafe partial class Executor
         if (!ValidWritePrice(action))
         {
             FailTopUp("original price no longer meets the configured floor");
+            return;
+        }
+        var beforeTransfer = topUp.BagUnits + topUp.SaddleUnits == 0 ? run.BalanceBefore.Values.Sum() : (int?)null;
+        if (!WithdrawToRetainer(action) && LiveCharacterAllowance(im, action, beforeTransfer) < action.Quantity)
+        {
+            FailTopUp("character inventory reserve changed before relisting");
             return;
         }
         run.BalanceBeforeRelist = bag.Values.Sum();

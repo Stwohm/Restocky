@@ -727,7 +727,8 @@ public sealed unsafe partial class Executor : IDisposable
         var actions = currentJobActions.Where(a => !unconfirmedTopUpItems.Contains((a.ItemId, a.IsHQ))
             && (!(a.StockRestock || a.TopUp != null) || a.RetainerKey == activeKey)
             && (!autoRestockPass || CanAutoRestock(a)));
-        var laterActions = autoRestockPass || currentJobActions.Any(a => a.StockRestock || a.TopUp != null)
+        var laterActions = autoRestockPass || currentJobActions.Any(a => a.StockRestock || a.TopUp != null
+            || configuration.KeepFor(a.ItemId, a.IsHQ) > 0)
             ? jobs.Skip(jobCursor + 1).SelectMany(j => j.Actions).Where(a => !autoRestockPass || CanAutoRestock(a))
             : null;
         var needs = RestockPlanner.SaddleStagingNeeds(actions, laterActions);
@@ -1670,20 +1671,25 @@ public sealed unsafe partial class Executor : IDisposable
         if (dstSlot < 0) { log.Warning("[Restocker] no free RetainerMarket slot"); return false; }
 
         var candidates = ListingSourceContainers(action);
-
+        var allowance = LiveCharacterAllowance(im, action);
         foreach (var t in candidates)
         {
+            var characterSource = CharBagContainers.Contains(t) || t == InventoryType.Crystals;
+            var quantity = characterSource ? Math.Min(action.Quantity, allowance) : action.Quantity;
+            if (quantity <= 0 || (listingRetried && quantity != action.Quantity)) continue;
             var c = im->GetInventoryContainer(t);
             if (c == null || !c->IsLoaded) continue;
             for (var i = 0; i < c->Size; i++)
             {
                 var item = c->GetInventorySlot(i);
-                if (!IsListingSource(item, action)) continue;
+                if (item == null || item->ItemId != action.ItemId || item->Quantity < quantity
+                    || ((item->Flags & InventoryItem.ItemFlags.HighQuality) != 0) != action.IsHQ) continue;
 
                 var price = (uint)action.UnitPrice;
                 var srcQtyBefore = item->Quantity;
                 if (listingRetried && (pendingSourceContainer != t || pendingSourceSlot != i
                     || pendingSourceQuantity != srcQtyBefore)) continue;
+                action.Quantity = quantity;
                 pendingSourceContainer = t;
                 pendingSourceSlot = i;
                 pendingSourceQuantity = srcQtyBefore;
@@ -2161,11 +2167,21 @@ public sealed unsafe partial class Executor : IDisposable
         var im = InventoryManager.Instance();
         var market = im != null ? im->GetInventoryContainer(InventoryType.RetainerMarket) : null;
 
+        var listing = currentJobActions.Peek();
+        var source = im != null ? im->GetInventoryContainer(pendingSourceContainer) : null;
+        var sourceSlot = source != null && source->IsLoaded && pendingSourceSlot < source->Size
+            ? source->GetInventorySlot(pendingSourceSlot) : null;
+        var protectingReserve = configuration.KeepFor(listing.ItemId, listing.IsHQ) > 0
+            && (CharBagContainers.Contains(pendingSourceContainer) || pendingSourceContainer == InventoryType.Crystals);
+        var remainingInSlot = sourceSlot == null ? -1 : sourceSlot->ItemId == 0 ? 0
+            : MatchesTopUpItem(sourceSlot, listing) ? sourceSlot->Quantity : -1;
+
         // 直前に出品した market slot に該当アイテムが入って qty が一致したら confirm
         var slot = market != null && market->IsLoaded && pendingListingSlot >= 0 && pendingListingSlot < market->Size
             ? market->GetInventorySlot(pendingListingSlot)
             : null;
-        if (slot != null && slot->ItemId == pendingListingItemId && slot->Quantity == pendingListingQuantity)
+        if (slot != null && slot->ItemId == pendingListingItemId && slot->Quantity == pendingListingQuantity
+            && (!protectingReserve || remainingInSlot == pendingSourceQuantity - pendingListingQuantity))
         {
             var hq = (slot->Flags & InventoryItem.ItemFlags.HighQuality) != 0;
             var action = currentJobActions.Peek();
@@ -2178,10 +2194,6 @@ public sealed unsafe partial class Executor : IDisposable
             }
         }
 
-        var listing = currentJobActions.Peek();
-        var source = im != null ? im->GetInventoryContainer(pendingSourceContainer) : null;
-        var sourceSlot = source != null && source->IsLoaded && pendingSourceSlot < source->Size
-            ? source->GetInventorySlot(pendingSourceSlot) : null;
         int? observed = IsListingSource(sourceSlot, listing) ? sourceSlot->Quantity : null;
         sourceStayedUnchanged &= observed == pendingSourceQuantity;
         if (waitingSince == null) waitingSince = DateTime.UtcNow;
@@ -2207,6 +2219,7 @@ public sealed unsafe partial class Executor : IDisposable
             }
             log.Warning($"[Restocker] new listing not confirmed in market#{pendingListingSlot} for item={pendingListingItemId} hq={pendingListingIsHQ} qty={pendingListingQuantity} (server lag or rejected). Skipping.");
             // A late server write could still arrive after the closing snapshot.
+            if (protectingReserve) unconfirmedTopUpItems.Add((listing.ItemId, listing.IsHQ));
             if (autoRetainerKey != null) unconfirmedHandoffListing = true;
             CompleteListing(IsRunning ? RestockSkipReason.TimedOut : RestockSkipReason.Unconfirmed);
         }
@@ -2512,7 +2525,7 @@ public sealed unsafe partial class Executor : IDisposable
 
         var character = Plugin.Instance.RetainerWatcher.CaptureCharacterSnapshot(loadedOnly: active != null);
         var plans = AutoRestockPlanner.Plan(configuration.LowStock, retainers, character,
-            Plugin.Instance.Tracker.Tracker, configuration.IsHeld, AutoRestockFloor);
+            Plugin.Instance.Tracker.Tracker, configuration.IsHeld, AutoRestockFloor, configuration.KeepFor);
         if (active != null) plans = AutoRestockPlanner.ForVisit(plans, active, retainers.First());
         foreach (var plan in plans.Where(p => p.Actions.Count == 0))
         {

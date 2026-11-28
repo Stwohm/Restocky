@@ -135,7 +135,11 @@ public sealed unsafe partial class Executor
     private void FinishCrystalWithdrawal(string? error)
     {
         var action = CurrentJob.Withdrawal!;
-        if (error == null) confirmedWithdrawals.Add(action);
+        if (error == null)
+        {
+            confirmedWithdrawals.Add(action);
+            action.CharacterBeforeCrystalWithdrawal = beforeCharacter;
+        }
         else
         {
             withdrawalFailures[action] = $"{CurrentJob.RetainerName}: {error}";
